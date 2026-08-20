@@ -1,6 +1,7 @@
 __pycache__/
 .pytest_cache/
 .venv/
+.agents/
 cache/
-outputs/*.txt
+outputs/
 *.pyc

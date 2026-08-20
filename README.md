@@ -1,6 +1,6 @@
 # book-downloader
 
-从一个小说 URL 或 Google 搜索结果自动发现目录、抓取章节并合并为 UTF-8 TXT。输入可以是目录页，也可以是任意章节页；程序会尝试从章节页找到目录链接，或者根据已知站点的 URL 结构推断目录页。
+从一个小说 URL 或已纳入站点的站内搜索结果自动发现目录、抓取章节并合并为 UTF-8 TXT。输入可以是目录页，也可以是任意章节页；程序会尝试从章节页找到目录链接，或者根据已知站点的 URL 结构推断目录页。
 
 项目只请求公开 HTML，不处理登录、验证码、付费墙、隐藏下载接口或反爬验证。遇到 Cloudflare 真人验证时会停止并提示，不会模拟或绕过验证。
 
@@ -24,7 +24,7 @@ python -m book_downloader "https://www.trxs.cc/tongren/11699/147.html"
 python -m book_downloader "https://www.trxs.cc/tongren/11699.html"
 ```
 
-也可以让 Google 只在已纳入的站点中搜索，再从结果中选择下载：
+也可以直接调用已纳入站点的公开站内搜索，再从结果中选择下载：
 
 ```powershell
 python -m book_downloader --search "姐姐 我也要一起当女仆吗"
@@ -32,8 +32,9 @@ python -m book_downloader --search "姐姐 我也要一起当女仆吗"
 
 程序会显示结果编号、站点、链接和摘要，然后等待输入编号。需要脚本模式时，
 可以用 `--search-result 2` 直接选择第二条结果。搜索范围由站点适配器注册表生成，
-当前包括 `trxs.cc` 和 `23txxt.com`；选中的章节页或目录页会继续走原有下载流程。
-如果 Google 返回 JavaScript、同意页面或人工验证页，可以加上 `--browser`，在可见浏览器中完成正常操作；程序不会绕过验证。
+当前纳入 `trxs.cc` 和 `23txxt.com`；其中只有提供稳定公开搜索入口的站点会参与搜索，
+选中的章节页或目录页会继续走原有下载流程。站点搜索遇到真人验证时，可以加上
+`--browser`，在可见浏览器中完成正常操作；程序不会绕过验证。
 
 输出默认写入 `outputs/<书名>.txt`，缓存默认写入 `cache/<站点>/<目录地址哈希>/`。重新运行同一本书时，已完成章节会自动复用；如果站点调整了目录顺序，程序会按章节 URL 对齐可复用缓存，并保留一份 `chapters.stale-*` 旧目录供恢复。输出 TXT 会根据当前目录和净化规则重新合并，不要求输出文件名固定。
 
@@ -62,7 +63,7 @@ python -m book_downloader "https://www.trxs.cc/tongren/11699/147.html" --output 
 python -m pip install "playwright>=1.40"
 ```
 
-运行（也适用于搜索模式）：
+运行（也适用于站内搜索模式）：
 
 ```powershell
 python -m book_downloader --browser "http://www.23txxt.com/bqg/111084/44601734_2.html" --output .\outputs\111084.txt
@@ -93,6 +94,7 @@ python -m book_downloader --browser-connect http://127.0.0.1:9222 "http://www.23
 
 - `trxs_cc.py`：目录识别、正文选择、章节标题净化和简介清理
 - `txxt.py`：23txxt 的目录排序、作者公告过滤、正文选择、分页标题/续页提示净化，以及 `_2.html` 续页 URL 规范化
+- 站内搜索：由各适配器分别提供 `build_search_request` 和 `parse_search_results`；请求可以按站点声明 GET/POST、表单参数和响应编码，没有稳定公开搜索入口的站点会自动跳过
 - `registry.py`：根据输入 URL 自动选择适配器
 
 章节净化是站点级逻辑。以 `trxs.cc` 为例，输出会删除重复的“书名 + 第 N 章”页面标题，保留一份干净的章节标题，并从第 1 章正文前移除作者、简介、推荐语等书籍介绍。
@@ -109,12 +111,12 @@ python -m unittest discover -s tests -v
 
 ```text
 book_downloader/
-├─ cli.py                 # URL/Google 搜索命令行
-├─ search.py              # Google 指定站点搜索与结果解析
+├─ cli.py                 # URL/站内搜索命令行
+├─ search.py              # 多站点站内搜索协调与结果选择
 ├─ discovery.py           # 从目录页或章节页发现书籍目录
 ├─ runner.py              # 章节抓取、续页跟随、净化、合并
 ├─ cache.py               # 按目录 URL 哈希保存缓存
-├─ http.py                # 请求、编码和验证页检测
+├─ http.py                # GET/POST 请求、编码和验证页检测
 ├─ browser.py             # 可见浏览器与人工验证/连接模式
 └─ sites/
    ├─ base.py             # 站点适配器基类

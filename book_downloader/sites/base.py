@@ -6,7 +6,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
-from ..models import Chapter, ChapterLink
+from ..models import Chapter, ChapterLink, SiteSearchHit, SiteSearchRequest
 from .common import (
     extract_book_title,
     extract_chapter_links,
@@ -54,3 +54,27 @@ class SiteAdapter(ABC):
 
     def canonical_chapter_url(self, url: str) -> str:
         return self.normalize_url(url)
+
+    def build_search_url(self, query: str, limit: int) -> str | None:
+        """返回公开站内搜索地址；没有稳定入口的站点返回 None。"""
+        del query, limit
+        return None
+
+    def build_search_request(
+        self,
+        query: str,
+        limit: int,
+    ) -> SiteSearchRequest | None:
+        """返回公开站内搜索请求；默认使用 GET 搜索地址。"""
+        url = self.build_search_url(query, limit)
+        return SiteSearchRequest(url=url) if url else None
+
+    def parse_search_results(
+        self,
+        html: str,
+        page_url: str,
+        limit: int,
+    ) -> tuple[SiteSearchHit, ...]:
+        """解析站内搜索结果；默认表示该站点暂未接入搜索。"""
+        del html, page_url, limit
+        return ()

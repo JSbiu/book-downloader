@@ -9,7 +9,7 @@ from .discovery import discover_book
 from .errors import DownloaderError
 from .http import HttpClient
 from .runner import download_book
-from .search import SearchResult, search_google
+from .search import SearchResult, search_sites
 from .sites.registry import adapter_for_url
 
 
@@ -37,7 +37,7 @@ def format_number_ranges(numbers: tuple[int, ...]) -> str:
 
 def print_search_results(results: tuple[SearchResult, ...]) -> None:
     sites = ", ".join(sorted({item.site for item in results}))
-    print(f"Google 搜索结果（已限定在 {sites}）")
+    print(f"站内搜索结果（已查询并限定在 {sites}）")
     for index, result in enumerate(results, start=1):
         print(f"[{index}] {result.title}")
         print(f"    站点：{result.site}")
@@ -83,13 +83,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--search",
         metavar="QUERY",
-        help="使用 Google 在已纳入站点中搜索关键词，然后选择下载结果",
+        help="使用已纳入站点的公开站内搜索，然后选择下载结果",
     )
     parser.add_argument(
         "--search-results",
         type=positive_int,
         default=10,
-        help="最多展示多少条 Google 搜索结果；默认 10",
+        help="最多展示多少条站内搜索结果；默认 10",
     )
     parser.add_argument(
         "--search-result",
@@ -170,7 +170,7 @@ def main() -> int:
             client = HttpClient(timeout=args.timeout, retries=args.retries)
         source_url = args.url
         if args.search:
-            results = search_google(client, args.search, limit=args.search_results)
+            results = search_sites(client, args.search, limit=args.search_results)
             print_search_results(results)
             selected = select_search_result(results, args.search_result)
             source_url = selected.url

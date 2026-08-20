@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import requests
@@ -38,6 +39,8 @@ def looks_like_verification_page(text: str) -> bool:
 
 
 class HttpClient:
+    supports_concurrent_requests = True
+
     def __init__(self, timeout: float, retries: int):
         self.timeout = timeout
         self.retries = retries
@@ -47,18 +50,36 @@ class HttpClient:
     def close(self) -> None:
         self.session.close()
 
-    def fetch(self, url: str) -> FetchedPage:
+    def fetch(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        data: bytes | str | None = None,
+        headers: Mapping[str, str] | None = None,
+        response_encoding: str | None = None,
+    ) -> FetchedPage:
         last_error: Exception | None = None
         for attempt in range(1, self.retries + 1):
             try:
-                response = self.session.get(url, timeout=self.timeout)
+                response = self.session.request(
+                    method=method,
+                    url=url,
+                    data=data,
+                    headers=dict(headers or {}),
+                    timeout=self.timeout,
+                )
                 if response.status_code in (401, 403, 429):
                     raise AccessBlockedError(
                         f"{url} 返回 HTTP {response.status_code}；"
                         "脚本不会绕过登录、Cloudflare、验证码或反爬验证"
                     )
                 response.raise_for_status()
-                response.encoding = response.apparent_encoding or "utf-8"
+                response.encoding = (
+                    response_encoding
+                    or response.apparent_encoding
+                    or "utf-8"
+                )
                 if looks_like_verification_page(response.text):
                     raise AccessBlockedError(
                         f"{url} 返回了真人验证页面；请使用站点允许的正常访问方式"

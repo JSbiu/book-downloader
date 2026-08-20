@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from shutil import which
 from urllib.parse import urlsplit
@@ -67,6 +68,9 @@ def find_chrome_executable(explicit: Path | None = None) -> Path:
 
 class BrowserHttpClient:
     """Use a visible browser after the user manually completes verification."""
+
+    # Playwright 页面导航和浏览器上下文不是为并发复用同一个页面设计的。
+    supports_concurrent_requests = False
 
     def __init__(
         self,
@@ -224,7 +228,64 @@ class BrowserHttpClient:
             self._page.wait_for_timeout(250)
         return self._target_page_is_readable(url)
 
-    def fetch(self, url: str) -> FetchedPage:
+    def _fetch_non_navigation_request(
+        self,
+        url: str,
+        *,
+        method: str,
+        data: bytes | str | None,
+        headers: Mapping[str, str] | None,
+        response_encoding: str | None,
+    ) -> FetchedPage:
+        try:
+            response = self._context.request.fetch(
+                url,
+                method=method,
+                data=data,
+                headers=dict(headers or {}),
+                timeout=int(self.timeout * 1000),
+                fail_on_status_code=False,
+            )
+        except self._playwright_error as error:
+            raise NetworkError(f"浏览器请求页面失败：{url}；{error}") from error
+
+        if response.status in (401, 403, 429):
+            raise AccessBlockedError(
+                f"{url} 返回 HTTP {response.status}；"
+                "脚本不会绕过登录、Cloudflare、验证码或反爬验证"
+            )
+        if response.status >= 400:
+            raise NetworkError(f"浏览器请求失败：{url} 返回 HTTP {response.status}")
+
+        try:
+            body = response.body()
+        except self._playwright_error as error:
+            raise NetworkError(f"读取浏览器响应失败：{url}；{error}") from error
+        text = body.decode(response_encoding or "utf-8", errors="replace")
+        if looks_like_verification_page(text):
+            raise AccessBlockedError(
+                f"{url} 返回了真人验证页面；请使用站点允许的正常访问方式"
+            )
+        return FetchedPage(url=response.url or url, text=text)
+
+    def fetch(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        data: bytes | str | None = None,
+        headers: Mapping[str, str] | None = None,
+        response_encoding: str | None = None,
+    ) -> FetchedPage:
+        if method.upper() != "GET":
+            return self._fetch_non_navigation_request(
+                url,
+                method=method.upper(),
+                data=data,
+                headers=headers,
+                response_encoding=response_encoding,
+            )
+
         navigation_timed_out = False
         try:
             self._page.goto(

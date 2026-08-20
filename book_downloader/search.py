@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import re
 from urllib.parse import urlsplit
 
 from .errors import AccessBlockedError, NetworkError, SearchError
@@ -25,6 +26,35 @@ class SearchResult:
 
 def _clean_query(query: str) -> str:
     return " ".join(query.split())
+
+
+def _normalize_for_match(value: str) -> str:
+    """去掉空格和标点，用于比较用户输入与站点返回的书名。"""
+    return "".join(char.casefold() for char in value if char.isalnum())
+
+
+def _search_query(query: str) -> tuple[str, bool]:
+    """选择一次站点搜索关键词，并标记是否需要本地标题过滤。"""
+    cleaned = _clean_query(query)
+    segments = tuple(part for part in re.split(r"[^\w]+", cleaned) if part)
+    if len(segments) <= 1:
+        return cleaned, False
+    return max(segments, key=len), True
+
+
+def _filter_normalized_hits(
+    hits: tuple[SiteSearchHit, ...],
+    query: str,
+) -> tuple[SiteSearchHit, ...]:
+    """只保留去掉标点/空格后仍包含完整关键词的宽松搜索结果。"""
+    normalized_query = _normalize_for_match(query)
+    if len(normalized_query) < 3:
+        return ()
+    return tuple(
+        hit
+        for hit in hits
+        if normalized_query in _normalize_for_match(hit.title)
+    )
 
 
 def _site_name(url: str, adapter: SiteAdapter) -> str:
@@ -79,7 +109,9 @@ def _search_one_site(
     client: HttpClient,
     adapter: SiteAdapter,
     request: SiteSearchRequest,
+    query: str,
     limit: int,
+    filter_hits: bool,
 ) -> tuple[str, tuple[SearchResult, ...]]:
     try:
         page = client.fetch(
@@ -93,6 +125,8 @@ def _search_one_site(
         return "blocked", ()
 
     hits = adapter.parse_search_results(page.text, page.url or request.url, limit)
+    if filter_hits:
+        hits = _filter_normalized_hits(hits, query)
     converted = tuple(
         result
         for hit in hits
@@ -106,17 +140,27 @@ def _search_one_site(
 def _search_site_requests(
     client: HttpClient,
     site_requests: tuple[tuple[SiteAdapter, SiteSearchRequest], ...],
+    query: str,
     limit: int,
+    filter_hits: bool,
 ) -> tuple[tuple[str, tuple[SearchResult, ...]], ...]:
     if len(site_requests) <= 1 or not getattr(client, "supports_concurrent_requests", False):
         return tuple(
-            _search_one_site(client, adapter, request, limit)
+            _search_one_site(client, adapter, request, query, limit, filter_hits)
             for adapter, request in site_requests
         )
 
     with ThreadPoolExecutor(max_workers=min(4, len(site_requests))) as executor:
         futures = tuple(
-            executor.submit(_search_one_site, client, adapter, request, limit)
+            executor.submit(
+                _search_one_site,
+                client,
+                adapter,
+                request,
+                query,
+                limit,
+                filter_hits,
+            )
             for adapter, request in site_requests
         )
         # 按注册顺序收集，保证最终交错结果稳定；请求本身已经并发发出。
@@ -133,6 +177,7 @@ def search_sites(
         raise SearchError("搜索关键词不能为空")
     if not 1 <= limit <= MAX_RESULT_LIMIT:
         raise SearchError(f"搜索结果数必须在 1 到 {MAX_RESULT_LIMIT} 之间")
+    search_query, filter_hits = _search_query(cleaned)
 
     site_results: list[tuple[SearchResult, ...]] = []
     available_sites: list[str] = []
@@ -141,14 +186,20 @@ def search_sites(
 
     site_requests: list[tuple[SiteAdapter, SiteSearchRequest]] = []
     for adapter in searchable_adapters():
-        request = adapter.build_search_request(cleaned, limit)
+        request = adapter.build_search_request(search_query, limit)
         if not request:
             unavailable_sites.append(adapter.name)
             continue
         available_sites.append(adapter.name)
         site_requests.append((adapter, request))
 
-    outcomes = _search_site_requests(client, tuple(site_requests), limit)
+    outcomes = _search_site_requests(
+        client,
+        tuple(site_requests),
+        cleaned,
+        limit,
+        filter_hits,
+    )
     for (adapter, _), (status, converted) in zip(site_requests, outcomes):
         if status == "blocked":
             blocked_sites.append(adapter.name)

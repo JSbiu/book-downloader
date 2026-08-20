@@ -49,6 +49,14 @@ class SiteAdapter(ABC):
     def sanitize_chapter(self, chapter: Chapter, book_title: str, first_chapter: bool) -> Chapter:
         return chapter
 
+    def assemble_chapters(
+        self,
+        chapters: list[Chapter],
+        book_title: str,
+    ) -> tuple[Chapter, ...]:
+        del book_title
+        return tuple(chapters)
+
     def find_next_page(self, soup: BeautifulSoup, page_url: str) -> str | None:
         return find_next_page_link(soup, page_url)
 

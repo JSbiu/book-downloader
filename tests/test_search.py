@@ -6,8 +6,14 @@ from book_downloader.cli import select_search_result
 from book_downloader.errors import DownloaderError, NetworkError
 from book_downloader.http import FetchedPage
 from book_downloader.models import SiteSearchHit
-from book_downloader.search import SearchResult, _merge_result_sets, search_sites
+from book_downloader.search import (
+    SearchResult,
+    _merge_result_sets,
+    _search_query,
+    search_sites,
+)
 from book_downloader.sites.base import SiteAdapter
+from book_downloader.sites.bixiange import BixiangeAdapter
 from book_downloader.sites.trxs_cc import TrxsCcAdapter
 
 
@@ -60,17 +66,32 @@ class FakeSearchAdapter(SiteAdapter):
         return self.results[:limit]
 
 
+class FallbackSearchAdapter(FakeSearchAdapter):
+    def parse_search_results(self, html: str, page_url: str, limit: int):
+        del html
+        if "q=示例小说&limit=" not in page_url:
+            return ()
+        return self.results[:limit]
+
+
 class SearchTests(unittest.TestCase):
+    def test_search_query_uses_longest_segment_and_marks_local_filtering(self):
+        self.assertEqual(
+            _search_query("示例小说，续篇"),
+            ("示例小说", True),
+        )
+        self.assertEqual(_search_query("示例小说"), ("示例小说", False))
+
     def test_trxs_search_url_uses_gbk_form_encoding(self):
-        url = TrxsCcAdapter().build_search_url("  我的魔法没有上限  ", 10)
+        url = TrxsCcAdapter().build_search_url("  示例小说  ", 10)
         params = parse_qs(urlsplit(url).query, encoding="gb2312")
 
-        self.assertEqual(params["keyboard"], ["我的魔法没有上限"])
+        self.assertEqual(params["keyboard"], ["示例小说"])
         self.assertEqual(params["show"], ["title"])
         self.assertEqual(params["classid"], ["0"])
 
     def test_trxs_search_request_uses_post_and_gbk_form_encoding(self):
-        request = TrxsCcAdapter().build_search_request("我的魔法没有上限", 10)
+        request = TrxsCcAdapter().build_search_request("示例小说", 10)
         self.assertEqual(request.method, "POST")
         self.assertEqual(request.url, "https://www.trxs.cc/e/search/index.php")
         self.assertEqual(request.response_encoding, "gb2312")
@@ -80,15 +101,15 @@ class SearchTests(unittest.TestCase):
         )
 
         params = parse_qs(request.data.decode("ascii"), encoding="gb2312")
-        self.assertEqual(params["keyboard"], ["我的魔法没有上限"])
+        self.assertEqual(params["keyboard"], ["示例小说"])
         self.assertEqual(params["show"], ["title"])
         self.assertEqual(params["classid"], ["0"])
 
     def test_trxs_results_parse_book_title_and_snippet(self):
         html = """
         <div class="bk">
-          <h3><a href="/tongren/11699.html">我的魔法没有上限</a></h3>
-          <div class="booknews">作者：测试作者</div>
+          <h3><a href="/tongren/11699.html">示例小说</a></h3>
+          <div class="booknews">作者：示例作者</div>
           <p>这是一本测试小说的简介。</p>
         </div>
         <div class="bk">
@@ -103,9 +124,44 @@ class SearchTests(unittest.TestCase):
         )
 
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].title, "我的魔法没有上限")
+        self.assertEqual(results[0].title, "示例小说")
         self.assertEqual(results[0].url, "https://www.trxs.cc/tongren/11699.html")
-        self.assertEqual(results[0].snippet, "作者：测试作者")
+        self.assertEqual(results[0].snippet, "作者：示例作者")
+
+    def test_bixiange_search_request_uses_gbk_form_encoding(self):
+        request = BixiangeAdapter().build_search_request("示例小说", 10)
+
+        self.assertEqual(request.method, "POST")
+        self.assertEqual(request.url, "https://www.bixiange.top/e/search/indexpage.php")
+        self.assertEqual(request.response_encoding, "gb18030")
+        params = parse_qs(request.data.decode("ascii"), encoding="gb2312")
+        self.assertEqual(params["keyboard"], ["示例小说"])
+        self.assertEqual(params["show"], ["title"])
+        self.assertEqual(params["classid"], ["0"])
+
+    def test_bixiange_results_parse_title_and_description(self):
+        html = """
+        <div class="list"><ul>
+          <li>
+            <div class="cover"><a href="/xhqh/12345"><img alt="示例小说"></a></div>
+            <div class="info">
+              <div class="title"><strong><a href="/xhqh/12345">示例小说</a></strong></div>
+              <div class="descript"><a href="/xhqh/12345">这是测试简介。</a></div>
+            </div>
+          </li>
+        </ul></div>
+        """
+
+        results = BixiangeAdapter().parse_search_results(
+            html,
+            "https://www.bixiange.top/e/search/result/",
+            10,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].title, "示例小说")
+        self.assertEqual(results[0].url, "https://www.bixiange.top/xhqh/12345")
+        self.assertEqual(results[0].snippet, "这是测试简介。")
 
     def test_trxs_results_parse_card_with_link_wrapping_entire_item(self):
         html = """
@@ -113,8 +169,8 @@ class SearchTests(unittest.TestCase):
           <div class="bk">
             <a href="/tongren/12098.html">
               <div class="infos">
-                <h3>你们都是我的翅膀！(1-636)</h3>
-                <div class="booknews">作者：田流酒 <label class="date">2026-08-15</label></div>
+                <h3>示例小说 (1-10)</h3>
+                <div class="booknews">作者：示例作者 <label class="date">2026-01-01</label></div>
                 <p>这是卡片摘要。</p>
               </div>
             </a>
@@ -129,9 +185,9 @@ class SearchTests(unittest.TestCase):
         )
 
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].title, "你们都是我的翅膀！(1-636)")
+        self.assertEqual(results[0].title, "示例小说 (1-10)")
         self.assertEqual(results[0].url, "https://www.trxs.cc/tongren/12098.html")
-        self.assertEqual(results[0].snippet, "作者：田流酒 2026-08-15")
+        self.assertEqual(results[0].snippet, "作者：示例作者 2026-01-01")
 
     def test_search_sites_queries_only_adapters_with_internal_search(self):
         html = """
@@ -145,13 +201,17 @@ class SearchTests(unittest.TestCase):
         results = search_sites(client, "目标小说", limit=5)
 
         self.assertEqual([result.title for result in results], ["目标小说"])
-        self.assertEqual(len(client.fetched), 1)
-        self.assertEqual(client.fetched[0]["method"], "POST")
-        self.assertEqual(client.fetched[0]["response_encoding"], "gb2312")
+        self.assertEqual(len(client.fetched), 2)
+        self.assertEqual([item["method"] for item in client.fetched], ["POST", "POST"])
         self.assertEqual(
-            client.fetched[0]["url"],
-            "https://www.trxs.cc/e/search/index.php",
+            [item["url"] for item in client.fetched],
+            [
+                "https://www.trxs.cc/e/search/index.php",
+                "https://www.bixiange.top/e/search/indexpage.php",
+            ],
         )
+        self.assertEqual(client.fetched[0]["response_encoding"], "gb2312")
+        self.assertEqual(client.fetched[1]["response_encoding"], "gb18030")
         self.assertNotIn("23txxt", str(client.fetched))
 
     def test_search_results_are_interleaved_by_site(self):
@@ -219,6 +279,22 @@ class SearchTests(unittest.TestCase):
             results = search_sites(PartiallyBlockedClient(""), "测试", limit=5)
 
         self.assertEqual([result.title for result in results], ["可用结果"])
+
+    def test_search_sites_uses_one_segment_query_and_filters_full_title(self):
+        adapter = FallbackSearchAdapter(
+            (SiteSearchHit("示例小说续篇 (1-10)", "https://fake.example/book", ""),)
+        )
+        client = SearchClient("")
+
+        with patch(
+            "book_downloader.search.searchable_adapters",
+            return_value=(adapter,),
+        ):
+            results = search_sites(client, "示例小说，续篇", limit=5)
+
+        self.assertEqual([result.title for result in results], ["示例小说续篇 (1-10)"])
+        self.assertEqual(len(client.fetched), 1)
+        self.assertIn("q=示例小说&limit=", str(client.fetched[0]["url"]))
 
 
 if __name__ == "__main__":

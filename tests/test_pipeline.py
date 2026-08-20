@@ -11,18 +11,19 @@ from book_downloader.discovery import discover_book
 from book_downloader.http import FetchedPage, looks_like_verification_page
 from book_downloader.models import BookPlan, Chapter, ChapterLink
 from book_downloader.runner import chapter_from_pages, download_book
+from book_downloader.sites.bixiange import BixiangeAdapter
 from book_downloader.sites.trxs_cc import TrxsCcAdapter
 from book_downloader.sites.txxt import TxxtAdapter
 
 
-BOOK_TITLE = "姐姐，我也要一起当女仆吗？"
+SAMPLE_BOOK_TITLE = "示例小说"
 
 
 def chapter_html(number: int, body: str, next_url: str | None = None) -> str:
     next_link = f'<a href="{next_url}">下一页</a>' if next_url else ""
     return f"""
-    <html><head><title>{BOOK_TITLE} 第{number}章</title></head><body>
-      <h1>{BOOK_TITLE} 第{number}章</h1>
+    <html><head><title>{SAMPLE_BOOK_TITLE} 第{number}章</title></head><body>
+      <h1>{SAMPLE_BOOK_TITLE} 第{number}章</h1>
       <div class="read_chapterDetail"><p>{body}</p>{next_link}</div>
     </body></html>
     """
@@ -39,15 +40,119 @@ class FakeClient:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_bixiange_book_page_discovers_catalog(self):
+        catalog_url = "https://www.bixiange.top/xhqh/12345/"
+        catalog = """
+        <div class="desc"><h1>示例小说(1-3)</h1></div>
+        <div class="catalog">
+          <a href="/xhqh/12345/index/1.html">第1节</a>
+          <a href="/xhqh/12345/index/2.html">第2节</a>
+          <a href="/xhqh/12345/index/3.html">第3节</a>
+        </div>
+        """
+
+        client = FakeClient({catalog_url: catalog})
+        plan = discover_book(client, BixiangeAdapter(), catalog_url)
+
+        self.assertEqual(plan.title, "示例小说")
+        self.assertEqual(plan.catalog_url, catalog_url)
+        self.assertEqual([item.number for item in plan.chapters], [1, 2, 3])
+
+    def test_bixiange_first_chapter_removes_intro_only(self):
+        chapter_url = "https://www.bixiange.top/xhqh/12345/index/1.html"
+        html = """
+        <div class="article"><h1>示例小说 第1节</h1>
+          <div id="mycontent">
+            <p>示例小说</p>
+            <p>作者：示例作者</p>
+            <p>这是书籍简介。</p>
+            <p>第一章 示例章节</p>
+            <p>第一段正文。</p>
+          </div>
+        </div>
+        """
+        adapter = BixiangeAdapter()
+        client = FakeClient({chapter_url: html})
+        link = ChapterLink(number=1, title="第1节", url=chapter_url)
+
+        chapter = chapter_from_pages(
+            client=client,
+            adapter=adapter,
+            link=link,
+            book_title="示例小说",
+            max_pages=5,
+        )
+
+        self.assertEqual(chapter.title, "第一章 示例章节")
+        self.assertEqual(chapter.content, "第一段正文。")
+
+    def test_bixiange_keeps_later_embedded_chapter_headings(self):
+        raw = Chapter(
+            3,
+            "第3节",
+            "前一段正文。\n第三章 示例章节标题\n后一段正文。",
+        )
+
+        cleaned = BixiangeAdapter().sanitize_chapter(
+            raw,
+            book_title="示例小说",
+            first_chapter=False,
+        )
+
+        self.assertEqual(cleaned.title, "第3节")
+        self.assertIn("第三章 示例章节标题", cleaned.content)
+
+    def test_bixiange_removes_section_labels_and_known_pollution(self):
+        raw = Chapter(
+            2,
+            "第2节",
+            "第2节\n正文第一段。\n?9提供最快\n正文第二段。",
+        )
+
+        cleaned = BixiangeAdapter().sanitize_chapter(
+            raw,
+            book_title="示例小说",
+            first_chapter=False,
+        )
+
+        self.assertNotIn("第2节", cleaned.content)
+        self.assertNotIn("提供最快", cleaned.content)
+        self.assertEqual(cleaned.content, "正文第一段。\n正文第二段。")
+
+    def test_bixiange_reassembles_real_chapters_from_section_pages(self):
+        chapters = [
+            Chapter(1, "第一章 示例章节", "第一章正文。"),
+            Chapter(
+                2,
+                "第2节",
+                "第一章续文。\n第二章 示例标题\n第二章正文。",
+            ),
+            Chapter(3, "第3节", "第二章续文。\n第三章 另一个标题\n第三章正文。"),
+        ]
+
+        assembled = BixiangeAdapter().assemble_chapters(
+            chapters,
+            book_title="示例小说",
+        )
+
+        self.assertEqual(
+            [chapter.title for chapter in assembled],
+            ["第一章 示例章节", "第二章 示例标题", "第三章 另一个标题"],
+        )
+        self.assertIn("第一章续文。", assembled[0].content)
+        self.assertNotIn("第二章 示例标题", assembled[0].content)
+        self.assertIn("第二章续文。", assembled[1].content)
+        self.assertNotIn("第2节", "\n".join(chapter.block for chapter in assembled))
+
     def test_chapter_page_discovers_catalog(self):
         chapter_url = "https://www.trxs.cc/tongren/11699/147.html"
         catalog_url = "https://www.trxs.cc/tongren/11699.html"
         catalog = """
-        <h1>姐姐，我也要一起当女仆吗？</h1>
+        <h1>示例小说</h1>
         <div id="list"><dl>
-          <dd><a href="/tongren/11699/146.html">第146章 情侣款</a></dd>
-          <dd><a href="/tongren/11699/147.html">第147章 你摸我腿干嘛？</a></dd>
-          <dd><a href="/tongren/11699/148.html">第148章 原来我这样都能绷住吗？</a></dd>
+          <dd><a href="/tongren/11699/146.html">第146章 示例章节一</a></dd>
+          <dd><a href="/tongren/11699/147.html">第147章 示例章节二</a></dd>
+          <dd><a href="/tongren/11699/148.html">第148章 示例章节三</a></dd>
         </dl></div>
         """
         input_page = (
@@ -59,7 +164,7 @@ class PipelineTests(unittest.TestCase):
         plan = discover_book(client, TrxsCcAdapter(), chapter_url)
         self.assertEqual(plan.catalog_url, catalog_url)
         self.assertEqual([item.number for item in plan.chapters], [1, 2, 3])
-        self.assertEqual(plan.chapters[1].title, "第147章 你摸我腿干嘛？")
+        self.assertEqual(plan.chapters[1].title, "第147章 示例章节二")
 
     def test_continuation_pages_are_joined(self):
         first_url = "https://www.trxs.cc/tongren/11699/147.html"
@@ -68,47 +173,47 @@ class PipelineTests(unittest.TestCase):
             {
                 first_url: chapter_html(
                     147,
-                    "姐姐，我也要一起当女仆吗？ 第147章\n第147章 你摸我腿干嘛？！\n第一分页正文。",
+                    "示例小说 第147章\n第147章 示例章节标题\n第一分页正文。",
                     second_url,
                 ),
                 second_url: chapter_html(147, "第二分页正文，应该接在第一分页后面。"),
             }
         )
-        link = ChapterLink(147, "第147章 你摸我腿干嘛？！", first_url)
+        link = ChapterLink(147, "第147章 示例章节标题", first_url)
         chapter = chapter_from_pages(
             client=client,
             adapter=TrxsCcAdapter(),
             link=link,
-            book_title=BOOK_TITLE,
+            book_title=SAMPLE_BOOK_TITLE,
             max_pages=5,
         )
-        self.assertEqual(chapter.title, "第147章 你摸我腿干嘛？！")
-        self.assertNotIn(f"{BOOK_TITLE} 第147章", chapter.content)
+        self.assertEqual(chapter.title, "第147章 示例章节标题")
+        self.assertNotIn(f"{SAMPLE_BOOK_TITLE} 第147章", chapter.content)
         self.assertIn("第一分页正文", chapter.content)
         self.assertIn("第二分页正文", chapter.content)
 
     def test_trxs_sanitizer_removes_intro_and_duplicate_header(self):
         raw = Chapter(
             1,
-            f"{BOOK_TITLE} 第1章",
-            f"{BOOK_TITLE} 第1章\n作者：电子熊猫\n简介：简介内容\n正文卷\n"
-            "第1章 收租，然后遇见医学奇迹\n真正正文。",
+            f"{SAMPLE_BOOK_TITLE} 第1章",
+            f"{SAMPLE_BOOK_TITLE} 第1章\n作者：示例作者\n简介：示例简介\n正文卷\n"
+            "第1章 示例章节标题\n真正正文。",
         )
-        cleaned = TrxsCcAdapter().sanitize_chapter(raw, BOOK_TITLE, True)
-        self.assertEqual(cleaned.title, "第1章 收租，然后遇见医学奇迹")
+        cleaned = TrxsCcAdapter().sanitize_chapter(raw, SAMPLE_BOOK_TITLE, True)
+        self.assertEqual(cleaned.title, "第1章 示例章节标题")
         self.assertNotIn("作者：", cleaned.content)
         self.assertNotIn("简介：", cleaned.content)
         self.assertNotIn("正文卷", cleaned.content)
-        self.assertNotIn(f"{BOOK_TITLE} 第1章", cleaned.content)
+        self.assertNotIn(f"{SAMPLE_BOOK_TITLE} 第1章", cleaned.content)
         self.assertIn("真正正文", cleaned.content)
 
     def test_trxs_title_removes_site_author_suffix(self):
         soup = BeautifulSoup(
-            "<title>姐姐，我也要一起当女仆吗？(电子熊猫)_同人小说网</title>",
+            "<title>示例小说(示例作者)_同人小说网</title>",
             "html.parser",
         )
         title = TrxsCcAdapter().extract_book_title(soup, "https://www.trxs.cc/tongren/11699.html")
-        self.assertEqual(title, BOOK_TITLE)
+        self.assertEqual(title, SAMPLE_BOOK_TITLE)
 
     def test_verification_page_is_detected(self):
         self.assertTrue(looks_like_verification_page("<title>Just a moment...</title>"))
@@ -141,15 +246,15 @@ class PipelineTests(unittest.TestCase):
     def test_txxt_sanitizer_uses_actual_title_and_removes_page_scaffolding(self):
         raw = Chapter(
             1,
-            "二三书库",
-            "1.变成蘑菇的公爵千金 (第1/2页)\n"
+            "示例作品",
+            "1.示例章节 (第1/2页)\n"
             "第一页正文。\n"
             "（本章未完，请点击下一页继续阅读）\n"
-            "1.变成蘑菇的公爵千金 (第2/2页)\n"
+            "1.示例章节 (第2/2页)\n"
             "第二页正文。",
         )
-        cleaned = TxxtAdapter().sanitize_chapter(raw, "这个地下城长蘑菇了", True)
-        self.assertEqual(cleaned.title, "1.变成蘑菇的公爵千金")
+        cleaned = TxxtAdapter().sanitize_chapter(raw, "示例作品", True)
+        self.assertEqual(cleaned.title, "1.示例章节")
         self.assertEqual(cleaned.content, "第一页正文。\n第二页正文。")
 
     def test_txxt_catalog_is_sorted_and_author_notes_are_filtered(self):
@@ -187,7 +292,7 @@ class PipelineTests(unittest.TestCase):
             }
         )
         plan = BookPlan(
-            title=BOOK_TITLE,
+            title=SAMPLE_BOOK_TITLE,
             catalog_url="https://www.trxs.cc/tongren/11699.html",
             chapters=(
                 ChapterLink(1, "第1章 第一章", first_url),
@@ -215,6 +320,98 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("第一章正文内容", text)
         self.assertIn("第2章 第二章", text)
         self.assertIn("第二章正文内容", text)
+
+    def test_download_book_can_limit_chapters(self):
+        urls = [
+            f"https://www.trxs.cc/tongren/11699/{number}.html"
+            for number in range(1, 4)
+        ]
+        client = FakeClient(
+            {
+                urls[0]: chapter_html(1, "第一章正文内容足够长。"),
+                urls[1]: chapter_html(2, "第二章正文内容足够长。"),
+                urls[2]: chapter_html(3, "第三章不应被请求。"),
+            }
+        )
+        plan = BookPlan(
+            title=SAMPLE_BOOK_TITLE,
+            catalog_url="https://www.trxs.cc/tongren/11699.html",
+            chapters=tuple(
+                ChapterLink(number, f"第{number}章", url)
+                for number, url in enumerate(urls, start=1)
+            ),
+        )
+
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary) / "sample.txt"
+            result = download_book(
+                client=client,
+                adapter=TrxsCcAdapter(),
+                plan=plan,
+                output=output,
+                output_dir=Path(temporary),
+                cache_root=Path(temporary) / "cache",
+                delay=0,
+                max_pages=5,
+                refresh=False,
+                max_chapters=2,
+            )
+            text = output.read_text(encoding="utf-8")
+
+        self.assertEqual(client.fetched, urls[:2])
+        self.assertEqual(result.total_chapters, 2)
+        self.assertEqual(result.skipped_chapters, 1)
+        self.assertFalse(result.interrupted)
+        self.assertNotIn("第三章不应被请求", text)
+
+    def test_download_book_handles_ctrl_c_and_writes_partial_output(self):
+        first_url = "https://www.trxs.cc/tongren/11699/1.html"
+        second_url = "https://www.trxs.cc/tongren/11699/2.html"
+        third_url = "https://www.trxs.cc/tongren/11699/3.html"
+
+        class InterruptingClient(FakeClient):
+            def fetch(self, url: str) -> FetchedPage:
+                self.fetched.append(url)
+                if url == second_url:
+                    raise KeyboardInterrupt
+                return FetchedPage(url=url, text=self.pages[url])
+
+        client = InterruptingClient(
+            {
+                first_url: chapter_html(1, "第一章正文内容足够长。"),
+                third_url: chapter_html(3, "第三章不应被请求。"),
+            }
+        )
+        plan = BookPlan(
+            title=SAMPLE_BOOK_TITLE,
+            catalog_url="https://www.trxs.cc/tongren/11699.html",
+            chapters=(
+                ChapterLink(1, "第1章", first_url),
+                ChapterLink(2, "第2章", second_url),
+                ChapterLink(3, "第3章", third_url),
+            ),
+        )
+
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary) / "partial.txt"
+            result = download_book(
+                client=client,
+                adapter=TrxsCcAdapter(),
+                plan=plan,
+                output=output,
+                output_dir=Path(temporary),
+                cache_root=Path(temporary) / "cache",
+                delay=0,
+                max_pages=5,
+                refresh=False,
+            )
+            text = output.read_text(encoding="utf-8")
+
+        self.assertEqual(client.fetched, [first_url, second_url])
+        self.assertEqual(result.total_chapters, 1)
+        self.assertEqual(result.failed_chapters, ())
+        self.assertTrue(result.interrupted)
+        self.assertIn("第一章正文内容", text)
 
     def test_cache_moves_chapters_when_number_mapping_changes(self):
         with TemporaryDirectory() as temporary:
@@ -265,7 +462,7 @@ class PipelineTests(unittest.TestCase):
             }
         )
         plan = BookPlan(
-            title=BOOK_TITLE,
+            title=SAMPLE_BOOK_TITLE,
             catalog_url="https://www.trxs.cc/tongren/11699.html",
             chapters=tuple(
                 ChapterLink(number, f"第{number}章", url)

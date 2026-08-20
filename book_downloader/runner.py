@@ -19,6 +19,8 @@ class DownloadResult:
     output: Path
     total_chapters: int
     failed_chapters: tuple[int, ...]
+    skipped_chapters: int = 0
+    interrupted: bool = False
 
 
 def safe_filename(name: str) -> str:
@@ -84,22 +86,35 @@ def download_book(
     max_pages: int,
     refresh: bool,
     max_consecutive_failures: int = 5,
+    max_chapters: int | None = None,
 ) -> DownloadResult:
     cache = BookCache(cache_root, adapter.name, plan.catalog_url)
     migrated = cache.save_plan(plan)
     if migrated:
         print(f"已按章节 URL 对齐并复用 {migrated} 个旧缓存。")
+    selected_chapters = (
+        plan.chapters
+        if max_chapters is None
+        else plan.chapters[:max_chapters]
+    )
+    skipped_chapters = len(plan.chapters) - len(selected_chapters)
+    if skipped_chapters:
+        print(
+            f"本次只处理前 {len(selected_chapters)} 个章节，"
+            f"剩余 {skipped_chapters} 个章节下次继续。"
+        )
     failed: set[int] = set()
     consecutive_failures = 0
     stopped_at: int | None = None
+    interrupted = False
 
-    for index, link in enumerate(plan.chapters, start=1):
-        if cache.read(link.number) and not refresh:
-            print(f"[{index}/{len(plan.chapters)}] {link.title}：使用缓存")
-            continue
-
-        print(f"[{index}/{len(plan.chapters)}] {link.title}：{link.url}")
+    for index, link in enumerate(selected_chapters, start=1):
         try:
+            if cache.read(link.number) and not refresh:
+                print(f"[{index}/{len(selected_chapters)}] {link.title}：使用缓存")
+                continue
+
+            print(f"[{index}/{len(selected_chapters)}] {link.title}：{link.url}")
             chapter = chapter_from_pages(
                 client=client,
                 adapter=adapter,
@@ -109,6 +124,8 @@ def download_book(
             )
             cache.write(chapter)
             consecutive_failures = 0
+            if delay and index < len(selected_chapters):
+                time.sleep(delay)
         except AccessBlockedError as error:
             failed.add(link.number)
             stopped_at = index
@@ -125,21 +142,23 @@ def download_book(
                     "避免继续请求异常页面。"
                 )
                 break
-
-        if delay and index < len(plan.chapters):
-            time.sleep(delay)
+        except KeyboardInterrupt:
+            interrupted = True
+            print("检测到 Ctrl+C，已停止后续下载；正在整理已完成缓存。")
+            break
 
     if stopped_at is not None:
-        for link in plan.chapters[stopped_at:]:
+        for link in selected_chapters[stopped_at:]:
             if refresh or cache.read(link.number) is None:
                 failed.add(link.number)
 
-    blocks: list[tuple[int, str]] = []
+    cleaned_chapters: list[Chapter] = []
     cleaned_cache_count = 0
-    for link in plan.chapters:
+    for link in selected_chapters:
         cached = cache.read_chapter(link.number)
         if cached is None:
-            failed.add(link.number)
+            if not interrupted:
+                failed.add(link.number)
             continue
         cleaned = adapter.sanitize_chapter(
             cached,
@@ -149,11 +168,24 @@ def download_book(
         if cleaned.block != cached.block:
             cache.write(cleaned)
             cleaned_cache_count += 1
-        blocks.append((link.number, cleaned.block))
+        cleaned_chapters.append(cleaned)
 
     if cleaned_cache_count:
         print(f"已用当前净化规则更新 {cleaned_cache_count} 个缓存章节。")
+
+    assembled_chapters = adapter.assemble_chapters(
+        cleaned_chapters,
+        book_title=plan.title,
+    )
+    blocks = [
+        (chapter.number, chapter.block)
+        for chapter in assembled_chapters
+    ]
     if not blocks:
+        if interrupted:
+            raise DownloaderError(
+                "已取消下载，尚未成功抓到章节；已保留目录和已有缓存"
+            )
         raise DownloaderError("没有成功抓到任何章节，未生成 TXT")
 
     output_path = output or (output_dir / f"{safe_filename(plan.title)}.txt")
@@ -169,4 +201,6 @@ def download_book(
         output=output_path,
         total_chapters=len(blocks),
         failed_chapters=tuple(sorted(failed)),
+        skipped_chapters=skipped_chapters,
+        interrupted=interrupted,
     )

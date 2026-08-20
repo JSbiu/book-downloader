@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .base import SiteAdapter
+from .bixiange import BixiangeAdapter
 from .trxs_cc import TrxsCcAdapter
 from .txxt import TxxtAdapter
 
@@ -36,4 +37,4 @@ def searchable_adapters() -> tuple[SiteAdapter, ...]:
 
     GenericAdapter 只是未知站点的兜底解析器，不应被拼进 Google 的 site: 条件。
     """
-    return (TrxsCcAdapter(), TxxtAdapter())
+    return (TrxsCcAdapter(), TxxtAdapter(), BixiangeAdapter())

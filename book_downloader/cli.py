@@ -104,6 +104,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retries", type=positive_int, default=3, help="失败重试次数")
     parser.add_argument("--max-pages", type=positive_int, default=50, help="单章最多跟随的续页数")
     parser.add_argument(
+        "--max-chapters",
+        type=positive_int,
+        help="只处理目录前 N 个章节；不传则处理全部",
+    )
+    parser.add_argument(
         "--max-consecutive-failures",
         type=positive_int,
         default=5,
@@ -192,18 +197,34 @@ def main() -> int:
             max_pages=args.max_pages,
             refresh=args.refresh,
             max_consecutive_failures=args.max_consecutive_failures,
+            max_chapters=args.max_chapters,
         )
     except DownloaderError as error:
         print(f"错误：{error}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("已取消操作；已保存的缓存不会丢失。", file=sys.stderr)
+        return 130
     finally:
         if client is not None:
             client.close()
 
     print(f"已合并 {result.total_chapters} 章：{result.output}")
+    if result.skipped_chapters:
+        print(
+            f"本次按限制未处理 {result.skipped_chapters} 个章节；"
+            "去掉 --max-chapters 后可继续处理。"
+        )
     if result.failed_chapters:
         missing = format_number_ranges(result.failed_chapters)
         print(f"未成功章节：{missing}", file=sys.stderr)
         print("重新运行相同命令即可利用缓存，只重试缺失章节。", file=sys.stderr)
         return 2
+    if result.interrupted:
+        print(
+            "已响应 Ctrl+C，已完成章节已写入缓存和部分 TXT；"
+            "下次运行相同命令即可继续。",
+            file=sys.stderr,
+        )
+        return 130
     return 0

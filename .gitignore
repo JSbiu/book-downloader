@@ -2,6 +2,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 .agents/
+.workbuddy/
 cache/
 outputs/
 *.pyc

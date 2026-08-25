@@ -57,6 +57,48 @@ python -m book_downloader "https://www.trxs.cc/tongren/11699/147.html" --output 
 - `--search-results`：搜索模式最多展示的结果数，默认 10
 - `--search-result`：搜索模式直接选择的结果编号，从 1 开始
 
+## 验证页自动切换浏览器
+
+普通 HTTP 模式默认开启 `--browser-fallback`：当请求返回 Cloudflare 等
+真人验证页时，程序会先询问是否打开可见浏览器。同意后浏览器窗口弹出，
+你手动完成验证，脚本自动检测页面恢复并继续下载；后续所有请求复用这个
+浏览器会话，不需要重启命令。程序不会自动破解验证，验证始终由你本人
+完成。可以用 `--no-browser-fallback` 关闭该行为；非交互环境（管道、
+脚本）中不会询问，仍按原样报错退出。
+
+需要浏览器模式的会话复用与 Chrome 手动连接方式，见下一节。
+
+## 69shuba 站内搜索
+
+69shuba 现在对整个域名做了 Cloudflare WAF 拦截，裸 `requests` 连首页
+都收 403；站内搜索入口又叠加了一层站点级 Cloudflare Turnstile 控件，
+必须在真实浏览器里通过验证换 `shuba` cookie 才能拿到结果。
+
+普通 HTTP 搜索默认会让 trxs.cc / 笔仙阁 / 69shuba 并发请求，但 69shuba
+会得到"访问受阻"，其余站点若 0 结果则用宽松书名匹配过滤掉。
+
+要让 69shuba 搜索能用，需要让搜索走真实浏览器：
+
+```powershell
+python -m book_downloader --browser --search "以一龙之力打倒整个世界"
+```
+
+或者把你自己开的 Chrome 接进来：
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="D:\workspace\Projects\book-downloader\cache\normal-chrome"
+python -m book_downloader --browser-connect http://127.0.0.1:9222 --search "以一龙之力打倒整个世界"
+```
+
+流程：脚本打开 69shuba 首页建立会话→ 填表提交搜索 → Cloudflare 可能
+弹"请验证您是真人"复选框 → 在浏览器窗口里点一下 → 脚本自动等结果
+出现并解析。Turnstile 验证超时用 `--verification-timeout` 控制，默认
+180 秒。
+
+注意：项目自己启动的 Chrome（`--browser`）带 `navigator.webdriver` 标记，
+69shuba 在这种指纹下连 Turnstile 复选框都不会显示；如果搜索一直卡在
+验证页面，请改用 `--browser-connect` 连你自己的 Chrome。
+
 ## 23txxt 的浏览器模式
 
 如果站点要求 Cloudflare 真人验证，可以使用可见浏览器模式。脚本不会
@@ -129,6 +171,7 @@ book_downloader/
 ├─ runner.py              # 章节抓取、续页跟随、净化、合并
 ├─ cache.py               # 按目录 URL 哈希保存缓存
 ├─ http.py                # GET/POST 请求、编码和验证页检测
+├─ fallback.py            # 验证页自动切换浏览器的客户端包装
 ├─ browser.py             # 可见浏览器与人工验证/连接模式
 └─ sites/
    ├─ base.py             # 站点适配器基类
@@ -136,6 +179,6 @@ book_downloader/
    ├─ trxs_cc.py          # trxs.cc 适配器
    ├─ txxt.py             # 23txxt 适配器
    ├─ bixiange.py         # 笔仙阁镜像适配器
-   ├─ shuba.py             # 69 书吧适配器
+   ├─ shuba.py             # 69 书吧适配器（含页面级搜索）
    └─ registry.py         # URL 到适配器的选择
 ```

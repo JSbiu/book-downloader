@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import re
 from urllib.parse import urlsplit
 
-from .errors import AccessBlockedError, NetworkError, SearchError
+from .errors import AccessBlockedError, ConfigurationError, DownloaderError, NetworkError, SearchError
 from .http import HttpClient
 from .models import SiteSearchHit, SiteSearchRequest
 from .sites.base import SiteAdapter
@@ -112,6 +112,8 @@ def _search_one_site(
     query: str,
     limit: int,
     filter_hits: bool,
+    *,
+    verification_timeout: float,
 ) -> tuple[str, tuple[SearchResult, ...]]:
     try:
         page = client.fetch(
@@ -125,6 +127,22 @@ def _search_one_site(
         return "blocked", ()
 
     hits = adapter.parse_search_results(page.text, page.url or request.url, limit)
+
+    if not hits:
+        # HTTP 拿不到结果时，若客户端支持且适配器声明了 search_via_page，
+        # 就在真实页面里再尝试一次（用于绕过 WAF/Turnstile 之类的页面级验证）。
+        page_search = getattr(client, "page_search", None)
+        if page_search is not None and hasattr(adapter, "search_via_page"):
+            try:
+                hits = page_search(
+                    adapter,
+                    query,
+                    limit,
+                    verification_timeout=verification_timeout,
+                )
+            except (ConfigurationError, AccessBlockedError, NetworkError, DownloaderError):
+                hits = ()
+
     if filter_hits:
         hits = _filter_normalized_hits(hits, query)
     converted = tuple(
@@ -143,10 +161,20 @@ def _search_site_requests(
     query: str,
     limit: int,
     filter_hits: bool,
+    *,
+    verification_timeout: float,
 ) -> tuple[tuple[str, tuple[SearchResult, ...]], ...]:
     if len(site_requests) <= 1 or not getattr(client, "supports_concurrent_requests", False):
         return tuple(
-            _search_one_site(client, adapter, request, query, limit, filter_hits)
+            _search_one_site(
+                client,
+                adapter,
+                request,
+                query,
+                limit,
+                filter_hits,
+                verification_timeout=verification_timeout,
+            )
             for adapter, request in site_requests
         )
 
@@ -160,6 +188,7 @@ def _search_site_requests(
                 query,
                 limit,
                 filter_hits,
+                verification_timeout=verification_timeout,
             )
             for adapter, request in site_requests
         )
@@ -171,12 +200,16 @@ def search_sites(
     client: HttpClient,
     query: str,
     limit: int = DEFAULT_RESULT_LIMIT,
+    *,
+    verification_timeout: float = 180.0,
 ) -> tuple[SearchResult, ...]:
     cleaned = _clean_query(query)
     if not cleaned:
         raise SearchError("搜索关键词不能为空")
     if not 1 <= limit <= MAX_RESULT_LIMIT:
         raise SearchError(f"搜索结果数必须在 1 到 {MAX_RESULT_LIMIT} 之间")
+    if verification_timeout <= 0:
+        raise SearchError("verification_timeout 必须大于 0")
     search_query, filter_hits = _search_query(cleaned)
 
     site_results: list[tuple[SearchResult, ...]] = []
@@ -199,6 +232,7 @@ def search_sites(
         cleaned,
         limit,
         filter_hits,
+        verification_timeout=verification_timeout,
     )
     for (adapter, _), (status, converted) in zip(site_requests, outcomes):
         if status == "blocked":

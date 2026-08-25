@@ -282,6 +282,69 @@ class SearchTests(unittest.TestCase):
         with self.assertRaises(DownloaderError):
             select_search_result(results, 3)
 
+    def test_search_sites_falls_back_to_page_search_when_http_empty(self):
+        empty_adapter = FakeSearchAdapter((), name="empty", host="empty.example")
+        empty_adapter.search_via_page = lambda page, query, limit, **kwargs: (
+            SiteSearchHit("页面级结果", "https://empty.example/book/1", "页面摘要"),
+        )
+
+        class PageSearchClient:
+            supports_concurrent_requests = True
+
+            def __init__(self):
+                self.page_calls = []
+
+            def fetch(self, url, **kwargs):
+                return FetchedPage(url=url, text="<html>no results</html>")
+
+            def page_search(self, adapter, query, limit, *, verification_timeout=None):
+                self.page_calls.append(
+                    {
+                        "adapter": adapter,
+                        "query": query,
+                        "limit": limit,
+                        "verification_timeout": verification_timeout,
+                    }
+                )
+                return adapter.search_via_page(None, query, limit)
+
+        client = PageSearchClient()
+        with patch("book_downloader.search.searchable_adapters", return_value=(empty_adapter,)):
+            results = search_sites(client, "示例", limit=5, verification_timeout=42)
+
+        self.assertEqual([result.title for result in results], ["页面级结果"])
+        self.assertEqual(
+            client.page_calls,
+            [
+                {
+                    "adapter": empty_adapter,
+                    "query": "示例",
+                    "limit": 5,
+                    "verification_timeout": 42,
+                }
+            ],
+        )
+
+    def test_search_sites_silently_skips_page_search_failure(self):
+        empty_adapter = FakeSearchAdapter((), name="empty", host="empty.example")
+        empty_adapter.search_via_page = lambda *args, **kwargs: (_ for _ in ()).throw(
+            NetworkError("页面级搜索也失败了")
+        )
+
+        class PageSearchClient:
+            supports_concurrent_requests = False
+
+            def fetch(self, url, **kwargs):
+                return FetchedPage(url=url, text="<html>no results</html>")
+
+            def page_search(self, adapter, query, limit, *, verification_timeout=None):
+                return adapter.search_via_page(None, query, limit)
+
+        client = PageSearchClient()
+        with patch("book_downloader.search.searchable_adapters", return_value=(empty_adapter,)):
+            with self.assertRaises(Exception):
+                search_sites(client, "示例", limit=5)
+
     def test_fake_sites_can_be_interleaved_by_coordinator(self):
         adapters = (
             FakeSearchAdapter(

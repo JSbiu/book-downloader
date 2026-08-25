@@ -7,6 +7,7 @@ from pathlib import Path
 from .browser import BrowserHttpClient
 from .discovery import discover_book
 from .errors import DownloaderError
+from .fallback import AutoSwitchHttpClient
 from .http import HttpClient
 from .runner import download_book
 from .search import SearchResult, search_sites
@@ -114,6 +115,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="连续失败多少个待下载章节后停止；默认 5",
     )
+    parser.add_argument(
+        "--browser-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "普通模式检测到真人验证页时，先询问再切换到可见浏览器"
+            "（默认开启，--no-browser-fallback 关闭）"
+        ),
+    )
     parser.add_argument("--refresh", action="store_true", help="忽略已有缓存并重新抓取")
     browser_modes = parser.add_mutually_exclusive_group()
     browser_modes.add_argument(
@@ -172,10 +182,27 @@ def main() -> int:
                 verification_timeout=args.verification_timeout,
             )
         else:
-            client = HttpClient(timeout=args.timeout, retries=args.retries)
+            http_client = HttpClient(timeout=args.timeout, retries=args.retries)
+            if args.browser_fallback:
+                client = AutoSwitchHttpClient(
+                    http_client,
+                    browser_factory=lambda: BrowserHttpClient(
+                        timeout=args.timeout,
+                        profile_dir=args.browser_profile,
+                        executable_path=args.browser_executable,
+                        verification_timeout=args.verification_timeout,
+                    ),
+                )
+            else:
+                client = http_client
         source_url = args.url
         if args.search:
-            results = search_sites(client, args.search, limit=args.search_results)
+            results = search_sites(
+                client,
+                args.search,
+                limit=args.search_results,
+                verification_timeout=args.verification_timeout,
+            )
             print_search_results(results)
             selected = select_search_result(results, args.search_result)
             source_url = selected.url

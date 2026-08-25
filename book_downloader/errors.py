@@ -6,6 +6,10 @@ class AccessBlockedError(DownloaderError):
     """服务器要求额外验证或拒绝了自动请求。"""
 
 
+class VerificationPageError(AccessBlockedError):
+    """页面是真人验证页（如 Cloudflare challenge），需要人工完成验证。"""
+
+
 class ChapterExtractionError(DownloaderError):
     """页面已返回，但无法定位公开正文。"""
 

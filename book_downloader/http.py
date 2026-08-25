@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import requests
 
-from .errors import AccessBlockedError, NetworkError
+from .errors import AccessBlockedError, NetworkError, VerificationPageError
 
 
 USER_AGENT = (
@@ -41,11 +41,23 @@ def looks_like_verification_page(text: str) -> bool:
 class HttpClient:
     supports_concurrent_requests = True
 
-    def __init__(self, timeout: float, retries: int):
+    def __init__(self, timeout: float, retries: int, *, unattended: bool = False):
         self.timeout = timeout
         self.retries = retries
+        self.unattended = unattended
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT})
+
+    def _blocked_message(self, url: str, detail: str) -> str:
+        if self.unattended:
+            return (
+                f"{url} {detail}；--auto 不会等待人工验证，也不会绕过站点防护；"
+                "请改用站点允许的公开接口或授权访问方式"
+            )
+        return (
+            f"{url} {detail}；"
+            "脚本不会绕过登录、Cloudflare、验证码或反爬验证"
+        )
 
     def close(self) -> None:
         self.session.close()
@@ -71,8 +83,10 @@ class HttpClient:
                 )
                 if response.status_code in (401, 403, 429):
                     raise AccessBlockedError(
-                        f"{url} 返回 HTTP {response.status_code}；"
-                        "脚本不会绕过登录、Cloudflare、验证码或反爬验证"
+                        self._blocked_message(
+                            url,
+                            f"返回 HTTP {response.status_code}",
+                        )
                     )
                 response.raise_for_status()
                 response.encoding = (
@@ -81,8 +95,11 @@ class HttpClient:
                     or "utf-8"
                 )
                 if looks_like_verification_page(response.text):
-                    raise AccessBlockedError(
-                        f"{url} 返回了真人验证页面；请使用站点允许的正常访问方式"
+                    raise VerificationPageError(
+                        self._blocked_message(
+                            url,
+                            "返回了真人验证页面",
+                        )
                     )
                 return FetchedPage(url=response.url, text=response.text)
             except AccessBlockedError:

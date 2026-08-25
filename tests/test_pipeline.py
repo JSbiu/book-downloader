@@ -12,6 +12,7 @@ from book_downloader.http import FetchedPage, looks_like_verification_page
 from book_downloader.models import BookPlan, Chapter, ChapterLink
 from book_downloader.runner import chapter_from_pages, download_book
 from book_downloader.sites.bixiange import BixiangeAdapter
+from book_downloader.sites.shuba import ShubaAdapter
 from book_downloader.sites.trxs_cc import TrxsCcAdapter
 from book_downloader.sites.txxt import TxxtAdapter
 
@@ -143,6 +144,64 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("第二章 示例标题", assembled[0].content)
         self.assertIn("第二章续文。", assembled[1].content)
         self.assertNotIn("第2节", "\n".join(chapter.block for chapter in assembled))
+
+    def test_shuba_book_page_discovers_catalog(self):
+        catalog_url = "https://www.69shuba.com/book/12345/"
+        catalog = """
+        <h1>示例小说</h1>
+        <div class="catalog"><ul>
+          <li><a href="/txt/12345/10001">第1章 示例章节一</a></li>
+          <li><a href="/txt/12345/10002">第2章 示例章节二</a></li>
+        </ul></div>
+        """
+
+        client = FakeClient({catalog_url: catalog})
+        plan = discover_book(client, ShubaAdapter(), catalog_url)
+
+        self.assertEqual(plan.title, "示例小说")
+        self.assertEqual(plan.catalog_url, catalog_url)
+        self.assertEqual([item.number for item in plan.chapters], [1, 2])
+        self.assertEqual(
+            plan.chapters[0].url,
+            "https://www.69shuba.com/txt/12345/10001",
+        )
+
+    def test_shuba_chapter_removes_page_scaffolding(self):
+        chapter_url = "https://www.69shuba.com/txt/12345/10001"
+        html = """
+        <html><head><title>示例小说-第1章 示例章节</title></head>
+        <body>
+          <div class="txtnav">
+            <h1>第1章 示例章节</h1>
+            <p>2026-01-01 作者：示例作者</p>
+            <p>第1章 示例章节</p>
+            <p>第一段正文。</p>
+            <p>第二段正文。</p>
+            <p>(本章完)</p>
+            <a href="/txt/12345/10002">下一章</a>
+          </div>
+        </body></html>
+        """
+
+        client = FakeClient({chapter_url: html})
+        chapter = chapter_from_pages(
+            client=client,
+            adapter=ShubaAdapter(),
+            link=ChapterLink(1, "第1章 示例章节", chapter_url),
+            book_title="示例小说",
+            max_pages=5,
+        )
+
+        self.assertEqual(chapter.title, "第1章 示例章节")
+        self.assertEqual(chapter.content, "第一段正文。\n第二段正文。")
+
+    def test_shuba_chapter_url_guesses_catalog(self):
+        self.assertEqual(
+            ShubaAdapter().guess_catalog_url(
+                "https://www.69shuba.com/txt/12345/10001"
+            ),
+            "https://www.69shuba.com/book/12345/",
+        )
 
     def test_chapter_page_discovers_catalog(self):
         chapter_url = "https://www.trxs.cc/tongren/11699/147.html"

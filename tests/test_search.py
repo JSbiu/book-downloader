@@ -14,6 +14,7 @@ from book_downloader.search import (
 )
 from book_downloader.sites.base import SiteAdapter
 from book_downloader.sites.bixiange import BixiangeAdapter
+from book_downloader.sites.shuba import ShubaAdapter
 from book_downloader.sites.trxs_cc import TrxsCcAdapter
 
 
@@ -163,6 +164,44 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(results[0].url, "https://www.bixiange.top/xhqh/12345")
         self.assertEqual(results[0].snippet, "这是测试简介。")
 
+    def test_shuba_search_request_uses_gbk_form_encoding(self):
+        request = ShubaAdapter().build_search_request("示例小说", 10)
+
+        self.assertEqual(request.method, "POST")
+        self.assertEqual(
+            request.url,
+            "https://www.69shuba.com/modules/article/search.php",
+        )
+        self.assertEqual(request.response_encoding, "gb18030")
+        params = parse_qs(request.data.decode("ascii"), encoding="gb2312")
+        self.assertEqual(params["searchkey"], ["示例小说"])
+        self.assertEqual(params["submit"], ["Search"])
+
+    def test_shuba_results_parse_book_links(self):
+        html = """
+        <div class="result">
+          <a href="/book/12345/">示例小说</a>
+          <p>作者：示例作者</p>
+        </div>
+        <a href="/book/12345/">示例小说</a>
+        <a href="/book/67890.htm">另一个示例</a>
+        """
+
+        results = ShubaAdapter().parse_search_results(
+            html,
+            "https://www.69shuba.com/modules/article/search.php",
+            10,
+        )
+
+        self.assertEqual(
+            [(item.title, item.url) for item in results],
+            [
+                ("示例小说", "https://www.69shuba.com/book/12345/"),
+                ("另一个示例", "https://www.69shuba.com/book/67890.htm"),
+            ],
+        )
+        self.assertEqual(results[0].snippet, "示例小说 作者：示例作者")
+
     def test_trxs_results_parse_card_with_link_wrapping_entire_item(self):
         html = """
         <div class="books m-cols">
@@ -201,17 +240,22 @@ class SearchTests(unittest.TestCase):
         results = search_sites(client, "目标小说", limit=5)
 
         self.assertEqual([result.title for result in results], ["目标小说"])
-        self.assertEqual(len(client.fetched), 2)
-        self.assertEqual([item["method"] for item in client.fetched], ["POST", "POST"])
+        self.assertEqual(len(client.fetched), 3)
+        self.assertEqual(
+            [item["method"] for item in client.fetched],
+            ["POST", "POST", "POST"],
+        )
         self.assertEqual(
             [item["url"] for item in client.fetched],
             [
                 "https://www.trxs.cc/e/search/index.php",
                 "https://www.bixiange.top/e/search/indexpage.php",
+                "https://www.69shuba.com/modules/article/search.php",
             ],
         )
         self.assertEqual(client.fetched[0]["response_encoding"], "gb2312")
         self.assertEqual(client.fetched[1]["response_encoding"], "gb18030")
+        self.assertEqual(client.fetched[2]["response_encoding"], "gb18030")
         self.assertNotIn("23txxt", str(client.fetched))
 
     def test_search_results_are_interleaved_by_site(self):

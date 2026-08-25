@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import re
+import time
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
+from ..errors import DownloaderError
 from ..models import Chapter, SiteSearchHit, SiteSearchRequest
 from .base import SiteAdapter
 from .common import absolute_url, clean_lines, extract_content
+
+
+SEARCH_RESULTS_MARKER = "a[href*='/book/']"
 
 
 DATE_LINE = re.compile(r"^\s*\d{4}-\d{2}-\d{2}\s*$")
@@ -98,6 +103,58 @@ class ShubaAdapter(SiteAdapter):
             if len(hits) >= limit:
                 break
         return tuple(hits)
+
+    def search_via_page(
+        self,
+        page,
+        query: str,
+        limit: int,
+        *,
+        navigation_timeout: float,
+        verification_timeout: float,
+    ) -> tuple[SiteSearchHit, ...]:
+        """在可见浏览器页面里直接执行 69shuba 站内搜索。
+
+        该站点搜索入口受 Cloudflare Turnstile 保护，普通 HTTP 请求会被 WAF
+        拦截，Turnstile 令牌也只能在真实浏览器内获得。脚本等待验证令牌就绪
+        （包括用户手动点选验证控件），随后复用页面级 parse_search_results。
+        """
+        page.goto(
+            "https://www.69shuba.com/",
+            wait_until="domcontentloaded",
+            timeout=int(navigation_timeout * 1000),
+        )
+        input_box = page.locator("input[name='searchkey']").first
+        input_box.wait_for(state="visible", timeout=int(navigation_timeout * 1000))
+        input_box.fill(query)
+        input_box.press("Enter")
+
+        try:
+            page.wait_for_url(
+                "**/modules/article/search.php**",
+                timeout=int(navigation_timeout * 1000),
+            )
+        except Exception:
+            pass
+
+        print(
+            "\n69shuba 搜索可能弹出 Cloudflare 人机验证；"
+            "请在打开的浏览器窗口里点一下验证，脚本会自动继续。",
+            flush=True,
+        )
+
+        deadline = time.monotonic() + verification_timeout
+        while time.monotonic() < deadline:
+            if page.locator(SEARCH_RESULTS_MARKER).count() > 0:
+                break
+            page.wait_for_timeout(1000)
+        else:
+            raise DownloaderError(
+                f"69shuba 搜索在 {verification_timeout} 秒内未拿到结果；"
+                "Cloudflare 验证未通过或站点改版。"
+            )
+
+        return self.parse_search_results(page.content(), page.url, limit)
 
     def guess_catalog_url(self, page_url: str) -> str | None:
         parts = urlsplit(page_url)

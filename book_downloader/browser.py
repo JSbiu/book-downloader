@@ -268,6 +268,32 @@ class BrowserHttpClient:
             )
         return FetchedPage(url=response.url or url, text=text)
 
+    def page_search(
+        self,
+        adapter,
+        query: str,
+        limit: int,
+        *,
+        verification_timeout: float | None = None,
+    ):
+        """在当前可见浏览器页面里执行适配器声明的页面级搜索。"""
+        if not hasattr(adapter, "search_via_page"):
+            raise ConfigurationError(
+                f"{adapter.name} 没有声明 search_via_page，无法走页面级搜索"
+            )
+        timeout = (
+            verification_timeout
+            if verification_timeout is not None
+            else self.verification_timeout
+        )
+        return adapter.search_via_page(
+            self._page,
+            query,
+            limit,
+            navigation_timeout=self.timeout,
+            verification_timeout=timeout,
+        )
+
     def fetch(
         self,
         url: str,

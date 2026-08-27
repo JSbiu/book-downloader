@@ -36,6 +36,11 @@ python -m book_downloader --search "示例小说"
 选中的章节页或目录页会继续走原有下载流程。站点搜索遇到真人验证时，可以加上
 `--browser`，在可见浏览器中完成正常操作；程序不会绕过验证。
 
+注意 `23txxt.com` 和 `69shuba.com` 整个域名都受 Cloudflare WAF 保护，普通 HTTP
+模式搜索时这两个站会显示"访问受阻"；要在搜索中包含它们，请使用 `--browser` 或
+`--browser-connect` 在浏览器中人工完成验证（23txxt 的浏览器搜索会自动填表提交，
+69shuba 需要手动点选 Turnstile 复选框）。其余站点若 0 结果则用宽松书名匹配过滤掉。
+
 如果关键词包含空格或标点，程序会使用最长的连续关键词请求，并对返回书名做去空格、
 去标点匹配，以减少输入格式差异造成的漏搜；每个站点每次搜索只发送一次请求，避免触发站点频控。
 
@@ -66,6 +71,10 @@ python -m book_downloader "https://www.trxs.cc/tongren/11699/147.html" --output 
 完成。可以用 `--no-browser-fallback` 关闭该行为；非交互环境（管道、
 脚本）中不会询问，仍按原样报错退出。
 
+注意：69shuba 等站点会对连续高频请求周期性重新弹验证（实测约每
+30~40 章一次）；验证通过后脚本会自动冷却 3 秒再继续。若触发仍然频繁，
+可加大章节间隔 `--delay 2` 或 `--delay 3` 降低请求频率。
+
 需要浏览器模式的会话复用与 Chrome 手动连接方式，见下一节。
 
 ## 69shuba 站内搜索
@@ -83,7 +92,16 @@ python -m book_downloader "https://www.trxs.cc/tongren/11699/147.html" --output 
 python -m book_downloader --browser --search "以一龙之力打倒整个世界"
 ```
 
-或者把你自己开的 Chrome 接进来：
+或者用 `--browser-connect` 接真实浏览器。不带地址时脚本会自动处理：
+先探测 9222-9224 端口上已开的调试窗口（例如你之前手动启动的 Chrome），
+有就复用；没有则自动启动默认浏览器（Chrome/Edge，独立配置目录，不影响
+日常浏览），无需手动操作：
+
+```powershell
+python -m book_downloader --browser-connect --search "以一龙之力打倒整个世界"
+```
+
+也可以显式指定你自己开的 Chrome：
 
 ```powershell
 & "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="D:\workspace\Projects\book-downloader\cache\normal-chrome"
@@ -136,12 +154,15 @@ $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
 python -m book_downloader --browser-connect http://127.0.0.1:9222 "http://www.23txxt.com/bqg/111084/44601734_2.html" --output .\outputs\111084.txt
 ```
 
+`--browser-connect` 也可以不带地址：脚本自动探测已开的调试端口并复用，
+没有则自动启动默认浏览器，不需要手动操作。
+
 ## 站点适配
 
 站点差异放在 `book_downloader/sites/`：
 
 - `trxs_cc.py`：目录识别、正文选择、章节标题净化和简介清理
-- `txxt.py`：23txxt 的目录排序、作者公告过滤、正文选择、分页标题/续页提示净化，以及 `_2.html` 续页 URL 规范化
+- `txxt.py`：23txxt 的目录排序、作者公告过滤、正文选择、分页标题/续页提示净化，以及 `_2.html` 续页 URL 规范化；站内搜索支持普通 HTTP 请求和浏览器页面级搜索（WAF 拦截时自动填表并等待人工验证）
 - `bixiange.py`：笔仙阁镜像的 GBK 搜索、目录识别、正文选择、分段合并和首节简介截取
 - `shuba.py`：69 书吧的 GBK 搜索、目录识别、正文选择和页面模板净化
 - 站内搜索：由各适配器分别提供 `build_search_request` 和 `parse_search_results`；请求可以按站点声明 GET/POST、表单参数和响应编码，没有稳定公开搜索入口的站点会自动跳过

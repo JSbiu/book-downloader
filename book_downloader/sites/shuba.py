@@ -7,9 +7,14 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 from bs4 import BeautifulSoup
 
 from ..errors import DownloaderError
-from ..models import Chapter, SiteSearchHit, SiteSearchRequest
+from ..models import Chapter, ChapterLink, SiteSearchHit, SiteSearchRequest
 from .base import SiteAdapter
-from .common import absolute_url, clean_lines, extract_content
+from .common import (
+    absolute_url,
+    chapter_number_from_text,
+    clean_lines,
+    extract_content,
+)
 
 
 SEARCH_RESULTS_MARKER = "a[href*='/book/']"
@@ -99,10 +104,40 @@ class ShubaAdapter(SiteAdapter):
             if snippet == title:
                 snippet = ""
             seen.add(url)
-            hits.append(SiteSearchHit(title=title, url=url, snippet=snippet))
+            # /book/<id>.htm 是书的详情页（只含最新章节），统一规范化到
+            # 完整目录页 /book/<id>/，避免目录发现只提到最后几章。
+            hits.append(SiteSearchHit(title=title, url=self.normalize_book_url(url), snippet=snippet))
             if len(hits) >= limit:
                 break
         return tuple(hits)
+
+    def normalize_book_url(self, url: str) -> str:
+        """把 69shuba 书页地址统一为完整目录格式 /book/<id>/。"""
+        parts = urlsplit(url)
+        match = re.fullmatch(r"/book/(\d+)(?:\.html?)?", parts.path, re.IGNORECASE)
+        if not match:
+            return url
+        return urlunsplit(
+            (parts.scheme, parts.netloc, f"/book/{match.group(1)}/", "", "")
+        )
+
+    def extract_chapter_links(self, soup, page_url: str):
+        links = list(super().extract_chapter_links(soup, page_url))
+        numbered = [
+            (chapter_number_from_text(link.title, 0), order, link)
+            for order, link in enumerate(links)
+        ]
+        if sum(1 for number, _, _ in numbered if number > 0) < 3:
+            return links
+        # 69shuba 目录页顶部有"最新章节"置顶区，与完整目录重复；通用去重只按
+        # URL 保留首见，置顶章节会落在最前面，还会被倒序检测误判反转。
+        # 这里按章节号稳定排序（无编号的番外保持原顺序排到末尾），
+        # 置顶重复章自然归位。
+        numbered.sort(key=lambda item: (item[0] == 0, item[0], item[1]))
+        return [
+            ChapterLink(number=index, title=link.title, url=link.url)
+            for index, (_, _, link) in enumerate(numbered, start=1)
+        ]
 
     def search_via_page(
         self,
@@ -158,9 +193,16 @@ class ShubaAdapter(SiteAdapter):
 
     def guess_catalog_url(self, page_url: str) -> str | None:
         parts = urlsplit(page_url)
+        path = parts.path.rstrip("/")
+        book = re.fullmatch(r"/book/(\d+)(?:\.html?)?", path, re.IGNORECASE)
+        if book:
+            # /book/<id>.htm 是详情页，完整目录统一在 /book/<id>/。
+            return urlunsplit(
+                (parts.scheme, parts.netloc, f"/book/{book.group(1)}/", "", "")
+            )
         match = re.fullmatch(
             r"/txt/(\d+)/[^/]+",
-            parts.path.rstrip("/"),
+            path,
             re.IGNORECASE,
         )
         if not match:

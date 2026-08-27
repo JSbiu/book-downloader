@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
+import time
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
+from ..errors import DownloaderError
 from ..models import Chapter, SiteSearchHit, SiteSearchRequest
 from .base import SiteAdapter
 from .common import absolute_url, clean_lines, extract_content
@@ -102,6 +104,63 @@ class TrxsCcAdapter(SiteAdapter):
             if len(hits) >= limit:
                 break
         return tuple(hits)
+
+    def search_via_page(
+        self,
+        page,
+        query: str,
+        limit: int,
+        *,
+        navigation_timeout: float,
+        verification_timeout: float,
+    ) -> tuple[SiteSearchHit, ...]:
+        """在可见浏览器页面里执行 trxs.cc 站内搜索。
+
+        浏览器模式的 HTTP 请求带 Playwright 特征时可能被站点 WAF 拦截；
+        页面级搜索在真实浏览器里打开首页、自动填表提交，验证由用户手动完成。
+        """
+        page.goto(
+            "https://www.trxs.cc/",
+            wait_until="domcontentloaded",
+            timeout=int(navigation_timeout * 1000),
+        )
+        input_box = None
+        deadline = time.monotonic() + verification_timeout
+        printed = False
+        while time.monotonic() < deadline:
+            candidate = page.locator("input[name='keyboard']").first
+            try:
+                candidate.wait_for(state="visible", timeout=800)
+                input_box = candidate
+                break
+            except Exception:
+                pass
+            if not printed:
+                print(
+                    "\ntrxs.cc 可能弹出人机验证；"
+                    "请在打开的浏览器窗口里完成验证，脚本会自动继续。",
+                    flush=True,
+                )
+                printed = True
+            page.wait_for_timeout(1500)
+        if input_box is None:
+            raise DownloaderError(
+                "trxs.cc 搜索页没有找到搜索输入框；站点可能改版或验证未通过。"
+            )
+
+        input_box.fill(query)
+        input_box.press("Enter")
+        deadline = time.monotonic() + verification_timeout
+        while time.monotonic() < deadline:
+            if page.locator("div.bk").count() > 0:
+                break
+            page.wait_for_timeout(1000)
+        else:
+            raise DownloaderError(
+                f"trxs.cc 搜索在 {verification_timeout} 秒内未拿到结果；"
+                "验证未通过或站点改版。"
+            )
+        return self.parse_search_results(page.content(), page.url, limit)
 
     def guess_catalog_url(self, page_url: str) -> str | None:
         parts = urlsplit(page_url)

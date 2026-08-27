@@ -3,7 +3,7 @@ from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 from book_downloader.cli import select_search_result
-from book_downloader.errors import DownloaderError, NetworkError
+from book_downloader.errors import AccessBlockedError, DownloaderError, NetworkError
 from book_downloader.http import FetchedPage
 from book_downloader.models import SiteSearchHit
 from book_downloader.search import (
@@ -197,7 +197,8 @@ class SearchTests(unittest.TestCase):
             [(item.title, item.url) for item in results],
             [
                 ("示例小说", "https://www.69shuba.com/book/12345/"),
-                ("另一个示例", "https://www.69shuba.com/book/67890.htm"),
+                # .htm 详情页地址被统一规范化到完整目录页
+                ("另一个示例", "https://www.69shuba.com/book/67890/"),
             ],
         )
         self.assertEqual(results[0].snippet, "示例小说 作者：示例作者")
@@ -240,23 +241,24 @@ class SearchTests(unittest.TestCase):
         results = search_sites(client, "目标小说", limit=5)
 
         self.assertEqual([result.title for result in results], ["目标小说"])
-        self.assertEqual(len(client.fetched), 3)
+        self.assertEqual(len(client.fetched), 4)
         self.assertEqual(
             [item["method"] for item in client.fetched],
-            ["POST", "POST", "POST"],
+            ["POST", "GET", "POST", "POST"],
         )
         self.assertEqual(
             [item["url"] for item in client.fetched],
             [
                 "https://www.trxs.cc/e/search/index.php",
+                "http://www.23txxt.com/ar.php?keyWord=%E7%9B%AE%E6%A0%87%E5%B0%8F%E8%AF%B4",
                 "https://www.bixiange.top/e/search/indexpage.php",
                 "https://www.69shuba.com/modules/article/search.php",
             ],
         )
         self.assertEqual(client.fetched[0]["response_encoding"], "gb2312")
-        self.assertEqual(client.fetched[1]["response_encoding"], "gb18030")
+        self.assertEqual(client.fetched[1]["response_encoding"], "utf-8")
         self.assertEqual(client.fetched[2]["response_encoding"], "gb18030")
-        self.assertNotIn("23txxt", str(client.fetched))
+        self.assertEqual(client.fetched[3]["response_encoding"], "gb18030")
 
     def test_search_results_are_interleaved_by_site(self):
         first = tuple(
@@ -324,6 +326,46 @@ class SearchTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_search_sites_falls_back_to_page_search_when_http_blocked(self):
+        blocked_adapter = FakeSearchAdapter((), name="blocked", host="blocked.example")
+        blocked_adapter.search_via_page = lambda page, query, limit, **kwargs: (
+            SiteSearchHit("页面级结果", "https://blocked.example/book/1", "页面摘要"),
+        )
+
+        class BrowserClient:
+            supports_concurrent_requests = False
+
+            def __init__(self):
+                self.page_calls = []
+
+            def fetch(self, url, **kwargs):
+                raise AccessBlockedError(f"{url} 返回 HTTP 403")
+
+            def page_search(self, adapter, query, limit, *, verification_timeout=None):
+                self.page_calls.append((adapter, query, limit, verification_timeout))
+                return adapter.search_via_page(None, query, limit)
+
+        client = BrowserClient()
+        with patch("book_downloader.search.searchable_adapters", return_value=(blocked_adapter,)):
+            results = search_sites(client, "示例", limit=5, verification_timeout=42)
+
+        self.assertEqual([result.title for result in results], ["页面级结果"])
+        self.assertEqual(client.page_calls, [(blocked_adapter, "示例", 5, 42)])
+
+    def test_search_sites_blocks_site_when_page_search_unavailable(self):
+        adapter = FakeSearchAdapter((), name="blocked", host="blocked.example")
+
+        class BlockedClient:
+            supports_concurrent_requests = False
+
+            def fetch(self, url, **kwargs):
+                raise AccessBlockedError(f"{url} 返回 HTTP 403")
+
+        client = BlockedClient()
+        with patch("book_downloader.search.searchable_adapters", return_value=(adapter,)):
+            with self.assertRaises(Exception):
+                search_sites(client, "示例", limit=5)
 
     def test_search_sites_silently_skips_page_search_failure(self):
         empty_adapter = FakeSearchAdapter((), name="empty", host="empty.example")

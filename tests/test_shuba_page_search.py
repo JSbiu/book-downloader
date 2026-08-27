@@ -1,5 +1,7 @@
 import unittest
 
+from bs4 import BeautifulSoup
+
 from book_downloader.errors import DownloaderError
 from book_downloader.sites.shuba import ShubaAdapter
 
@@ -87,11 +89,68 @@ class ShubaPageSearchTests(unittest.TestCase):
             [(h.title, h.url) for h in hits],
             [
                 ("示例小说", "https://www.69shuba.com/book/12345/"),
-                ("另一个示例", "https://www.69shuba.com/book/67890.htm"),
+                # .htm 详情页地址被统一规范化到完整目录页
+                ("另一个示例", "https://www.69shuba.com/book/67890/"),
             ],
         )
         self.assertEqual(page.input_locator.filled, ["示例小说"])
         self.assertEqual(page.input_locator.pressed, ["Enter"])
+
+    def test_parse_search_results_normalizes_book_url_to_catalog(self):
+        html = """
+        <a href="/book/89702.htm">示例小说</a>
+        <a href="/book/67890/">另一个示例</a>
+        """
+        adapter = ShubaAdapter()
+        hits = adapter.parse_search_results(
+            html, "https://www.69shuba.com/", limit=10
+        )
+        self.assertEqual(
+            [hit.url for hit in hits],
+            [
+                "https://www.69shuba.com/book/89702/",
+                "https://www.69shuba.com/book/67890/",
+            ],
+        )
+
+    def test_extract_chapter_links_sorts_pinned_latest_chapter(self):
+        # 69shuba 目录页顶部有"最新章节"置顶区（第570章），与完整目录重复；
+        # 提取后应按章节号排序，第570章归位到末尾，而不是出现在最前面。
+        html = """
+        <div class="catalog">
+          <ul>
+            <li><a href="/txt/89702/41039598">第570章 亚特兰之主</a></li>
+          </ul>
+        </div>
+        <div class="catalog">
+          <ul>
+            <li><a href="/txt/89702/40266247">第1章 红铁之子</a></li>
+            <li><a href="/txt/89702/40266248">第2章 水亲和</a></li>
+            <li><a href="/txt/89702/41039598">第570章 亚特兰之主</a></li>
+          </ul>
+        </div>
+        """
+        adapter = ShubaAdapter()
+        links = adapter.extract_chapter_links(
+            BeautifulSoup(html, "html.parser"), "https://www.69shuba.com/book/89702/"
+        )
+        self.assertEqual(
+            [link.title for link in links],
+            ["第1章 红铁之子", "第2章 水亲和", "第570章 亚特兰之主"],
+        )
+        self.assertEqual(len(links), 3)
+
+    def test_guess_catalog_url_handles_book_detail_page(self):
+        adapter = ShubaAdapter()
+        self.assertEqual(
+            adapter.guess_catalog_url("https://www.69shuba.com/book/89702.htm"),
+            "https://www.69shuba.com/book/89702/",
+        )
+        self.assertEqual(
+            adapter.guess_catalog_url("https://www.69shuba.com/txt/89702/41039551"),
+            "https://www.69shuba.com/book/89702/",
+        )
+        self.assertIsNone(adapter.guess_catalog_url("https://www.69shuba.com/"))
 
     def test_search_via_page_times_out_when_no_results_appear(self):
         class _AlwaysEmptyResultsLocator(_FakeLocator):

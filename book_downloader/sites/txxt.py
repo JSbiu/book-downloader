@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlsplit, urlunsplit
+import time
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
-from ..models import Chapter, ChapterLink
+from bs4 import BeautifulSoup
+
+from ..errors import DownloaderError
+from ..models import Chapter, ChapterLink, SiteSearchHit, SiteSearchRequest
 from .base import SiteAdapter
 from .common import (
     absolute_url,
@@ -43,6 +47,154 @@ class TxxtAdapter(SiteAdapter):
         ".novel_content",
         ".box_box",
     )
+
+    search_url = "http://www.23txxt.com/ar.php"
+    search_input_names = (
+        "keyWord",
+        "keyboard",
+        "searchkey",
+        "key",
+        "q",
+        "word",
+        "searchword",
+    )
+    BOOK_LINK = re.compile(r"^/bqg/\d+(?:\.html?)?/?$", re.IGNORECASE)
+
+    def build_search_request(
+        self,
+        query: str,
+        limit: int,
+    ) -> SiteSearchRequest:
+        del limit
+        # 首页表单：<form action="/ar.php"> <input name="keyWord">；
+        # 页面为 UTF-8，直接 GET 携带关键词即可。
+        params = urlencode({"keyWord": " ".join(query.split())}, encoding="utf-8")
+        return SiteSearchRequest(
+            url=f"{self.search_url}?{params}",
+            method="GET",
+            headers=(("Referer", "http://www.23txxt.com/"),),
+            response_encoding="utf-8",
+        )
+
+    def parse_search_results(
+        self,
+        html: str,
+        page_url: str,
+        limit: int,
+    ) -> tuple[SiteSearchHit, ...]:
+        soup = BeautifulSoup(html, "html.parser")
+        hits: list[SiteSearchHit] = []
+        seen: set[str] = set()
+        for anchor in soup.select("a[href*='/bqg/']"):
+            url = absolute_url(anchor.get("href"), page_url)
+            if not url or not self.matches(url) or url in seen:
+                continue
+            if not self.BOOK_LINK.fullmatch(urlsplit(url).path):
+                continue
+            title = clean_lines(anchor.get_text(" ", strip=True))
+            if not title or len(title) > 120:
+                continue
+            parent = anchor.find_parent(["li", "dd", "div", "p"])
+            snippet = clean_lines(parent.get_text(" ", strip=True)) if parent else ""
+            if snippet == title:
+                snippet = ""
+            seen.add(url)
+            hits.append(SiteSearchHit(title=title, url=url, snippet=snippet))
+            if len(hits) >= limit:
+                break
+        return tuple(hits)
+
+    def search_via_page(
+        self,
+        page,
+        query: str,
+        limit: int,
+        *,
+        navigation_timeout: float,
+        verification_timeout: float,
+    ) -> tuple[SiteSearchHit, ...]:
+        """在可见浏览器页面里执行 23txxt 站内搜索。
+
+        23txxt 整个域名受 Cloudflare WAF 保护，裸 HTTP 请求连首页都拿不到；
+        浏览器模式由用户手动完成验证后，脚本自动填表提交搜索并等待结果。
+        """
+        page.goto(
+            "http://www.23txxt.com/",
+            wait_until="domcontentloaded",
+            timeout=int(navigation_timeout * 1000),
+        )
+        input_box = None
+        deadline = time.monotonic() + verification_timeout
+        printed = False
+        while time.monotonic() < deadline:
+            for name in self.search_input_names:
+                candidate = page.locator(f"input[name='{name}']").first
+                try:
+                    candidate.wait_for(state="visible", timeout=800)
+                    input_box = candidate
+                    break
+                except Exception:
+                    continue
+            if input_box is not None:
+                break
+            if not printed:
+                print(
+                    "\n23txxt 可能弹出 Cloudflare 人机验证；"
+                    "请在打开的浏览器窗口里完成验证，脚本会自动继续。",
+                    flush=True,
+                )
+                printed = True
+            page.wait_for_timeout(1500)
+        if input_box is None:
+            # 通过搜索按钮（submit）所在表单定位文本框，避免 name 改版失配。
+            try:
+                search_button = page.locator("input.btn-tosearch").first
+                search_button.wait_for(state="visible", timeout=1500)
+                form_html = search_button.evaluate(
+                    "el => { const f = el.closest('form'); "
+                    "return f ? f.outerHTML : ''; }"
+                )
+                if form_html:
+                    form_soup = BeautifulSoup(form_html, "html.parser")
+                    text_input = form_soup.select_one(
+                        "input[type='text'], input:not([type])"
+                    )
+                    name = text_input.get("name") if text_input is not None else None
+                    if name:
+                        candidate = page.locator(f"input[name='{name}']").first
+                        candidate.wait_for(state="visible", timeout=2000)
+                        input_box = candidate
+            except Exception:
+                pass
+        if input_box is None:
+            # 候选 name 都没命中时，若页面只剩一个可见文本框（多数小说站
+            # 首页只放搜索框），兜底填入，避免表单 name 改版导致搜索失效。
+            visible_text_inputs = page.locator(
+                "input[type='text'], input:not([type])"
+            )
+            text_input_count = visible_text_inputs.count()
+            if text_input_count == 1:
+                input_box = visible_text_inputs.first
+            else:
+                raise DownloaderError(
+                    f"23txxt 搜索页没有找到搜索输入框"
+                    f"（页面有 {text_input_count} 个文本框）；"
+                    "站点可能改版或验证未通过。"
+                )
+
+        input_box.fill(query)
+        input_box.press("Enter")
+        deadline = time.monotonic() + verification_timeout
+        while time.monotonic() < deadline:
+            if page.locator("a[href*='/bqg/']").count() > 0:
+                break
+            page.wait_for_timeout(1000)
+        else:
+            raise DownloaderError(
+                f"23txxt 搜索在 {verification_timeout} 秒内未拿到结果；"
+                "Cloudflare 验证未通过或站点改版。"
+            )
+        return self.parse_search_results(page.content(), page.url, limit)
 
     @staticmethod
     def _is_extra_chapter_title(title: str) -> bool:

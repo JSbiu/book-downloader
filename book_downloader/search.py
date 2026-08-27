@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import re
+import sys
 from urllib.parse import urlsplit
 
 from .errors import AccessBlockedError, ConfigurationError, DownloaderError, NetworkError, SearchError
@@ -105,6 +106,48 @@ def _merge_result_sets(
     return tuple(merged)
 
 
+def _page_search_hits(
+    client,
+    adapter: SiteAdapter,
+    query: str,
+    limit: int,
+    *,
+    verification_timeout: float,
+) -> tuple[SiteSearchHit, ...] | None:
+    """浏览器页面级搜索；客户端不支持或适配器未声明时返回 None。"""
+    page_search = getattr(client, "page_search", None)
+    if page_search is None or not hasattr(adapter, "search_via_page"):
+        return None
+    try:
+        return page_search(
+            adapter,
+            query,
+            limit,
+            verification_timeout=verification_timeout,
+        )
+    except (ConfigurationError, AccessBlockedError, NetworkError, DownloaderError) as error:
+        # 失败原因打印到 stderr，方便诊断（如输入框未找到、验证超时等）。
+        print(f"{adapter.name} 页面搜索失败：{error}", file=sys.stderr)
+        return None
+
+
+def _convert_hits(
+    hits: tuple[SiteSearchHit, ...],
+    adapter: SiteAdapter,
+    query: str,
+    filter_hits: bool,
+) -> tuple[SearchResult, ...]:
+    if filter_hits:
+        hits = _filter_normalized_hits(hits, query)
+    return tuple(
+        result
+        for hit in hits
+        if hit.title.strip()
+        for result in (_convert_hit(hit, adapter),)
+        if result is not None
+    )
+
+
 def _search_one_site(
     client: HttpClient,
     adapter: SiteAdapter,
@@ -124,35 +167,35 @@ def _search_one_site(
             response_encoding=request.response_encoding,
         )
     except (AccessBlockedError, NetworkError):
+        # 浏览器模式下即使 HTTP 请求被 WAF 拦截，也可以回退到真实页面搜索
+        # （页面验证由用户手动完成，脚本只负责等待和解析）。
+        hits = _page_search_hits(
+            client,
+            adapter,
+            query,
+            limit,
+            verification_timeout=verification_timeout,
+        )
+        if hits:
+            return "ok", _convert_hits(hits, adapter, query, filter_hits)
         return "blocked", ()
 
     hits = adapter.parse_search_results(page.text, page.url or request.url, limit)
 
     if not hits:
         # HTTP 拿不到结果时，若客户端支持且适配器声明了 search_via_page，
-        # 就在真实页面里再尝试一次（用于绕过 WAF/Turnstile 之类的页面级验证）。
-        page_search = getattr(client, "page_search", None)
-        if page_search is not None and hasattr(adapter, "search_via_page"):
-            try:
-                hits = page_search(
-                    adapter,
-                    query,
-                    limit,
-                    verification_timeout=verification_timeout,
-                )
-            except (ConfigurationError, AccessBlockedError, NetworkError, DownloaderError):
-                hits = ()
+        # 就在真实页面里再尝试一次（用于 WAF/Turnstile 之类的页面级验证）。
+        page_hits = _page_search_hits(
+            client,
+            adapter,
+            query,
+            limit,
+            verification_timeout=verification_timeout,
+        )
+        if page_hits:
+            hits = page_hits
 
-    if filter_hits:
-        hits = _filter_normalized_hits(hits, query)
-    converted = tuple(
-        result
-        for hit in hits
-        if hit.title.strip()
-        for result in (_convert_hit(hit, adapter),)
-        if result is not None
-    )
-    return "ok", converted
+    return "ok", _convert_hits(hits, adapter, query, filter_hits)
 
 
 def _search_site_requests(
@@ -241,6 +284,12 @@ def search_sites(
 
     results = _merge_result_sets(tuple(site_results), limit)
     if results:
+        if blocked_sites:
+            print(
+                f"提示：{', '.join(blocked_sites)} 因站点验证未能参与本次搜索；"
+                "可加 --browser 或 --browser-connect 在浏览器中人工完成验证后重试。",
+                file=sys.stderr,
+            )
         return results
 
     if not available_sites:
@@ -253,6 +302,9 @@ def search_sites(
     if unavailable_sites:
         details.append(f"未配置：{', '.join(unavailable_sites)}")
     if blocked_sites:
-        details.append(f"访问受阻：{', '.join(blocked_sites)}")
+        details.append(
+            f"访问受阻：{', '.join(blocked_sites)}"
+            "（可尝试 --browser / --browser-connect 在浏览器中人工验证后搜索）"
+        )
     suffix = f"（{'；'.join(details)}）" if details else ""
     raise SearchError(f"站内搜索没有返回已纳入站点的结果{suffix}")

@@ -12,8 +12,20 @@ import requests
 
 from .errors import AccessBlockedError, ConfigurationError, NetworkError
 from .http import FetchedPage, USER_AGENT, looks_like_verification_page
+from .sites.registry import adapter_for_url
 
 AUTO_CDP_PORTS = (9222, 9223, 9224)
+
+
+def should_use_browser(url: str, http_fallback) -> bool:
+    """按站点分级决定请求通道：无需验证的站点走普通 HTTP 静默请求。"""
+    if http_fallback is None:
+        return True
+    try:
+        adapter = adapter_for_url(url)
+    except Exception:
+        return True
+    return adapter.requires_browser
 
 
 def _probe_cdp(port: int, timeout: float = 2.0) -> bool:
@@ -109,6 +121,7 @@ class BrowserHttpClient:
         executable_path: Path | None = None,
         verification_timeout: float = 180.0,
         cdp_url: str | None = None,
+        http_fallback=None,
     ):
         try:
             from playwright.sync_api import (
@@ -130,6 +143,7 @@ class BrowserHttpClient:
         self._playwright_error = PlaywrightError
         self._playwright_timeout_error = PlaywrightTimeoutError
         self._playwright_target_closed_error = PlaywrightTargetClosedError
+        self._http_fallback = http_fallback
         self._playwright = sync_playwright().start()
         self._browser = None
         self._context = None
@@ -180,6 +194,12 @@ class BrowserHttpClient:
             except Exception:
                 pass
             self._browser = None
+        if getattr(self, "_http_fallback", None) is not None:
+            try:
+                self._http_fallback.close()
+            except Exception:
+                pass
+            self._http_fallback = None
         if getattr(self, "_playwright", None) is not None:
             try:
                 self._playwright.stop()
@@ -416,6 +436,17 @@ class BrowserHttpClient:
         headers: Mapping[str, str] | None = None,
         response_encoding: str | None = None,
     ) -> FetchedPage:
+        if self._http_fallback is not None and not should_use_browser(
+            url, self._http_fallback
+        ):
+            # 站点分级：无需真人验证的站点直接走普通 HTTP，保持静默。
+            return self._http_fallback.fetch(
+                url,
+                method=method,
+                data=data,
+                headers=headers,
+                response_encoding=response_encoding,
+            )
         if method.upper() != "GET":
             return self._fetch_non_navigation_request(
                 url,

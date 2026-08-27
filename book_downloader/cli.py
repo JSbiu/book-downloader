@@ -173,6 +173,8 @@ def main() -> int:
 
     client = None
     try:
+        # 普通 HTTP 客户端始终存在：浏览器模式下作为"无需验证站点"的静默通道。
+        http_client = HttpClient(timeout=args.timeout, retries=args.retries)
         if args.browser_connect:
             client = BrowserHttpClient(
                 timeout=args.timeout,
@@ -180,6 +182,7 @@ def main() -> int:
                 executable_path=args.browser_executable,
                 verification_timeout=args.verification_timeout,
                 cdp_url=args.browser_connect,
+                http_fallback=http_client,
             )
         elif args.browser:
             client = BrowserHttpClient(
@@ -187,9 +190,9 @@ def main() -> int:
                 profile_dir=args.browser_profile,
                 executable_path=args.browser_executable,
                 verification_timeout=args.verification_timeout,
+                http_fallback=http_client,
             )
         else:
-            http_client = HttpClient(timeout=args.timeout, retries=args.retries)
             if args.browser_fallback:
                 client = AutoSwitchHttpClient(
                     http_client,
@@ -198,6 +201,7 @@ def main() -> int:
                         profile_dir=args.browser_profile,
                         executable_path=args.browser_executable,
                         verification_timeout=args.verification_timeout,
+                        http_fallback=http_client,
                     ),
                 )
             else:

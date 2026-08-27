@@ -28,6 +28,7 @@ CONTINUATION_NOTICE = re.compile(
 class TxxtAdapter(SiteAdapter):
     name = "23txxt"
     hosts = ("23txxt.com",)
+    requires_browser = True
     catalog_selectors = (
         "#list dl dd a",
         ".listmain dl dd a",

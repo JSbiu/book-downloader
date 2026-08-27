@@ -40,6 +40,7 @@ class ShubaAdapter(SiteAdapter):
 
     name = "69shuba"
     hosts = ("69shuba.com",)
+    requires_browser = True
     catalog_selectors = (
         ".catalog ul li a",
         ".listmain dd a",

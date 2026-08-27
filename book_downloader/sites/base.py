@@ -21,6 +21,9 @@ class SiteAdapter(ABC):
     hosts: tuple[str, ...] = ()
     catalog_selectors: tuple[str, ...] = ()
     content_selectors: tuple[str, ...] = ()
+    # 站点是否需要可见浏览器才能访问（整域 WAF/验证码拦截时为 True）。
+    # 浏览器模式下，requires_browser=False 的站点会走普通 HTTP 静默请求。
+    requires_browser = False
 
     def matches(self, url: str) -> bool:
         host = urlsplit(url).netloc.lower()

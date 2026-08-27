@@ -133,8 +133,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     browser_modes.add_argument(
         "--browser-connect",
+        nargs="?",
+        const="auto",
         metavar="CDP_URL",
-        help="连接已手动启动的普通 Chrome，例如 http://127.0.0.1:9222",
+        help=(
+            "连接已启动的 Chrome 调试端口，例如 http://127.0.0.1:9222；"
+            "不带地址时自动复用已开的调试窗口，没有则自动启动默认浏览器"
+        ),
     )
     parser.add_argument(
         "--browser-profile",
@@ -171,6 +176,8 @@ def main() -> int:
         if args.browser_connect:
             client = BrowserHttpClient(
                 timeout=args.timeout,
+                profile_dir=args.browser_profile,
+                executable_path=args.browser_executable,
                 verification_timeout=args.verification_timeout,
                 cdp_url=args.browser_connect,
             )

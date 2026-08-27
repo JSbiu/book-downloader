@@ -1,14 +1,44 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 from collections.abc import Mapping
 from pathlib import Path
 from shutil import which
 from urllib.parse import urlsplit
 
+import requests
+
 from .errors import AccessBlockedError, ConfigurationError, NetworkError
-from .http import FetchedPage, looks_like_verification_page
+from .http import FetchedPage, USER_AGENT, looks_like_verification_page
+
+AUTO_CDP_PORTS = (9222, 9223, 9224)
+
+
+def _probe_cdp(port: int, timeout: float = 2.0) -> bool:
+    """检测端口上是否有可用的 Chrome DevTools 调试服务。"""
+    try:
+        response = requests.get(
+            f"http://127.0.0.1:{port}/json/version",
+            timeout=timeout,
+        )
+        return response.status_code == 200 and '"Browser"' in response.text
+    except Exception:
+        return False
+
+
+def _start_default_browser(port: int, profile_dir: Path, executable: Path) -> None:
+    """启动默认浏览器的调试实例（独立配置目录，不影响日常浏览）。"""
+    subprocess.Popen(
+        [
+            str(executable),
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={str(profile_dir)}",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def _is_google_host(host: str) -> bool:
@@ -86,6 +116,10 @@ class BrowserHttpClient:
                 TimeoutError as PlaywrightTimeoutError,
                 sync_playwright,
             )
+            # TargetClosedError 在部分版本未从 sync_api 顶层导出。
+            from playwright._impl._errors import (
+                TargetClosedError as PlaywrightTargetClosedError,
+            )
         except ModuleNotFoundError as error:
             raise ConfigurationError(
                 "浏览器模式需要 Playwright；请先执行：python -m pip install playwright"
@@ -95,6 +129,7 @@ class BrowserHttpClient:
         self.verification_timeout = verification_timeout
         self._playwright_error = PlaywrightError
         self._playwright_timeout_error = PlaywrightTimeoutError
+        self._playwright_target_closed_error = PlaywrightTargetClosedError
         self._playwright = sync_playwright().start()
         self._browser = None
         self._context = None
@@ -104,6 +139,11 @@ class BrowserHttpClient:
 
         try:
             if cdp_url:
+                if cdp_url == "auto":
+                    cdp_url = self._resolve_auto_cdp_url(
+                        profile_dir or Path("cache/browser-profile"),
+                        executable_path,
+                    )
                 self._browser = self._playwright.chromium.connect_over_cdp(cdp_url)
                 if not self._browser.contexts:
                     raise ConfigurationError("已连接 Chrome，但没有可用浏览器上下文")
@@ -147,6 +187,60 @@ class BrowserHttpClient:
                 pass
             self._playwright = None
 
+    def _resolve_auto_cdp_url(
+        self,
+        profile_dir: Path,
+        executable_path: Path | None,
+    ) -> str:
+        """自动模式：先复用已开的调试窗口，没有则启动默认浏览器实例。
+
+        已开的窗口只需带 --remote-debugging-port 即可被检测到；没有时脚本
+        用独立配置目录自动拉起默认浏览器（Chrome/Edge），不影响日常浏览。
+        """
+        for port in AUTO_CDP_PORTS:
+            if _probe_cdp(port):
+                print(f"已复用浏览器调试端口 {port}。")
+                return f"http://127.0.0.1:{port}"
+        browser_path = find_chrome_executable(executable_path)
+        profile = profile_dir.expanduser().resolve()
+        profile.mkdir(parents=True, exist_ok=True)
+        print(
+            f"没有发现已开的调试窗口，正在自动启动 {browser_path.name} ..."
+        )
+        _start_default_browser(AUTO_CDP_PORTS[0], profile, browser_path)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if _probe_cdp(AUTO_CDP_PORTS[0]):
+                print("浏览器已就绪。")
+                return f"http://127.0.0.1:{AUTO_CDP_PORTS[0]}"
+            time.sleep(1)
+        raise ConfigurationError(
+            "自动启动浏览器超时；可手动运行 "
+            "chrome --remote-debugging-port=9222 后重试"
+        )
+
+    def _ensure_page(self) -> None:
+        """连接模式下页面可能被用户手动关闭；失效时重建一个可用页面。"""
+        if (
+            self._context is not None
+            and self._page is not None
+            and not self._page.is_closed()
+        ):
+            return
+        contexts = (
+            [item for item in self._browser.contexts if not item.is_closed()]
+            if self._browser is not None
+            else []
+        )
+        if not contexts:
+            raise NetworkError(
+                "浏览器连接已失效；请确认 Chrome 仍开着，且未关闭 "
+                "--remote-debugging-port=9222 对应窗口"
+            )
+        self._context = contexts[0]
+        pages = [page for page in self._context.pages if not page.is_closed()]
+        self._page = pages[0] if pages else self._context.new_page()
+
     def _wait_for_manual_verification(self, url: str) -> None:
         print(
             f"\n浏览器正在等待人工验证：{url}\n"
@@ -159,6 +253,9 @@ class BrowserHttpClient:
                 if self._target_page_is_readable(url):
                     stable_checks += 1
                     if stable_checks >= 2:
+                        # 验证刚通过时站点风控仍在盯梢，稍作冷却再继续，
+                        # 降低连续请求再次触发验证的概率。
+                        time.sleep(3)
                         return
                 else:
                     stable_checks = 0
@@ -238,11 +335,15 @@ class BrowserHttpClient:
         response_encoding: str | None,
     ) -> FetchedPage:
         try:
+            # Playwright 的 APIRequestContext 默认 UA 带 playwright 特征，
+            # 会被站点 WAF 识别；未显式指定时补一个普通 Chrome UA。
+            request_headers = dict(headers or {})
+            request_headers.setdefault("User-Agent", USER_AGENT)
             response = self._context.request.fetch(
                 url,
                 method=method,
                 data=data,
-                headers=dict(headers or {}),
+                headers=request_headers,
                 timeout=int(self.timeout * 1000),
                 fail_on_status_code=False,
             )
@@ -286,13 +387,25 @@ class BrowserHttpClient:
             if verification_timeout is not None
             else self.verification_timeout
         )
-        return adapter.search_via_page(
-            self._page,
-            query,
-            limit,
-            navigation_timeout=self.timeout,
-            verification_timeout=timeout,
-        )
+        self._ensure_page()
+        try:
+            return adapter.search_via_page(
+                self._page,
+                query,
+                limit,
+                navigation_timeout=self.timeout,
+                verification_timeout=timeout,
+            )
+        except self._playwright_target_closed_error:
+            # 用户可能手动关闭了复用的标签页；重建页面后重试一次。
+            self._ensure_page()
+            return adapter.search_via_page(
+                self._page,
+                query,
+                limit,
+                navigation_timeout=self.timeout,
+                verification_timeout=timeout,
+            )
 
     def fetch(
         self,
@@ -313,12 +426,26 @@ class BrowserHttpClient:
             )
 
         navigation_timed_out = False
+        self._ensure_page()
         try:
             self._page.goto(
                 url,
                 wait_until="domcontentloaded",
                 timeout=int(self.timeout * 1000),
             )
+        except self._playwright_target_closed_error:
+            # 用户可能手动关闭了复用的标签页；重建页面后重试一次。
+            self._ensure_page()
+            try:
+                self._page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=int(self.timeout * 1000),
+                )
+            except self._playwright_timeout_error:
+                navigation_timed_out = True
+            except self._playwright_error as error:
+                raise NetworkError(f"浏览器打开页面失败：{url}；{error}") from error
         except self._playwright_timeout_error:
             navigation_timed_out = True
         except self._playwright_error as error:

@@ -148,6 +148,28 @@ def _convert_hits(
     )
 
 
+def _relevance_score(title: str, query: str) -> int:
+    """按标题与搜索词的匹配程度打分：完全一致 > 前缀 > 包含完整词 > 弱匹配。"""
+    normalized_title = _normalize_for_match(title)
+    normalized_query = _normalize_for_match(query)
+    if not normalized_title or not normalized_query:
+        return 0
+    if normalized_title == normalized_query:
+        return 100
+    if normalized_title.startswith(normalized_query):
+        return 90
+    if normalized_query in normalized_title:
+        return 70
+    if (
+        len(normalized_query) >= 3
+        and len(normalized_title) >= 3
+        and normalized_title in normalized_query
+    ):
+        # 标题只是搜索词的一部分（站点分词返回），弱相关
+        return 40
+    return 0
+
+
 def _search_one_site(
     client: HttpClient,
     adapter: SiteAdapter,
@@ -282,7 +304,14 @@ def search_sites(
             blocked_sites.append(adapter.name)
         site_results.append(converted)
 
-    results = _merge_result_sets(tuple(site_results), limit)
+    merged = _merge_result_sets(tuple(site_results), limit * 2)
+    results = tuple(
+        sorted(
+            merged,
+            key=lambda item: _relevance_score(item.title, cleaned),
+            reverse=True,
+        )
+    )[:limit]
     if results:
         if blocked_sites:
             print(

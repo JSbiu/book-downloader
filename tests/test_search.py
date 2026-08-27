@@ -403,6 +403,48 @@ class SearchTests(unittest.TestCase):
 
         self.assertEqual([result.title for result in results], ["甲", "乙"])
 
+    def test_search_sites_orders_by_relevance(self):
+        adapters = (
+            FakeSearchAdapter(
+                (SiteSearchHit("完全不相关小说", "https://noisy.example/a", ""),),
+                name="noisy",
+                host="noisy.example",
+            ),
+            FakeSearchAdapter(
+                (SiteSearchHit("以一龙之力打倒整个世界！", "https://exact.example/b", ""),),
+                name="exact",
+                host="exact.example",
+            ),
+        )
+        client = SearchClient("")
+
+        with patch("book_downloader.search.searchable_adapters", return_value=adapters):
+            results = search_sites(client, "以一龙之力打倒整个世界", limit=5)
+
+        self.assertEqual(
+            [result.title for result in results],
+            ["以一龙之力打倒整个世界！", "完全不相关小说"],
+        )
+
+    def test_relevance_score_ranks_exact_over_partial(self):
+        from book_downloader.search import _relevance_score
+
+        self.assertEqual(
+            _relevance_score("以一龙之力打倒整个世界！", "以一龙之力打倒整个世界"), 100
+        )
+        self.assertEqual(
+            _relevance_score("以一龙之力打倒整个世界续集", "以一龙之力打倒整个世界"), 90
+        )
+        self.assertEqual(
+            _relevance_score("我的以一龙之力打倒整个世界", "以一龙之力打倒整个世界"), 70
+        )
+        self.assertEqual(
+            _relevance_score("以一龙之力", "以一龙之力打倒整个世界"), 40
+        )
+        self.assertEqual(
+            _relevance_score("方舟女尊博士的辛苦生活", "以一龙之力打倒整个世界"), 0
+        )
+
     def test_search_sites_isolates_one_blocked_site(self):
         good = FakeSearchAdapter(
             (SiteSearchHit("可用结果", "https://good.example/book", ""),),

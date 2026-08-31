@@ -45,6 +45,14 @@ class SiteAdapter(ABC):
     def guess_catalog_url(self, page_url: str) -> str | None:
         return None
 
+    def canonical_catalog_url(self, url: str) -> str:
+        """返回缓存身份使用的规范目录地址；默认与输入一致。
+
+        同一本书若存在多种地址形态（如 69shuba 的详情页 .htm 与完整目录 /），
+        适配器应在这里归一，避免缓存按 URL 哈希时分裂成多份。
+        """
+        return url
+
     def parse_chapter(self, html: str, chapter: int) -> Chapter:
         soup = BeautifulSoup(html, "html.parser")
         return extract_content(soup, self.content_selectors, chapter)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -88,6 +88,11 @@ def download_book(
     max_consecutive_failures: int = 5,
     max_chapters: int | None = None,
 ) -> DownloadResult:
+    # 缓存身份用适配器规范化的目录地址：同一本书的多种地址形态
+    # （如 69shuba 详情页 .htm 与完整目录 /）落到同一份缓存。
+    canonical_catalog = adapter.canonical_catalog_url(plan.catalog_url)
+    if canonical_catalog != plan.catalog_url:
+        plan = replace(plan, catalog_url=canonical_catalog)
     cache = BookCache(cache_root, adapter.name, plan.catalog_url)
     migrated = cache.save_plan(plan)
     if migrated:

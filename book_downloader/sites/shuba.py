@@ -212,6 +212,11 @@ class ShubaAdapter(SiteAdapter):
             (parts.scheme, parts.netloc, f"/book/{match.group(1)}/", "", "")
         )
 
+    def canonical_catalog_url(self, url: str) -> str:
+        # 详情页 .htm 与完整目录 / 指向同一本书；缓存身份统一用目录格式，
+        # 避免同一本书按 URL 哈希分裂成多份缓存。
+        return self.normalize_book_url(url)
+
     def parse_chapter(self, html: str, chapter: int) -> Chapter:
         soup = BeautifulSoup(html, "html.parser")
         return extract_content(soup, self.content_selectors, chapter)

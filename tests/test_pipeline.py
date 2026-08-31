@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5,7 +6,7 @@ from tempfile import TemporaryDirectory
 from bs4 import BeautifulSoup
 
 from book_downloader.browser import same_target_document
-from book_downloader.cache import BookCache
+from book_downloader.cache import BookCache, cache_key
 from book_downloader.cli import format_number_ranges
 from book_downloader.discovery import discover_book
 from book_downloader.http import FetchedPage, looks_like_verification_page
@@ -202,6 +203,56 @@ class PipelineTests(unittest.TestCase):
             ),
             "https://www.69shuba.com/book/12345/",
         )
+
+    def test_shuba_detail_page_shares_cache_identity_with_catalog(self):
+        canonical_catalog = "https://www.69shuba.com/book/89702/"
+        self.assertEqual(
+            ShubaAdapter().canonical_catalog_url(
+                "https://www.69shuba.com/book/89702.htm"
+            ),
+            canonical_catalog,
+        )
+        self.assertEqual(
+            ShubaAdapter().canonical_catalog_url(canonical_catalog),
+            canonical_catalog,
+        )
+
+        chapter_url = "https://www.69shuba.com/txt/89702/10001"
+        client = FakeClient(
+            {
+                chapter_url: (
+                    "<html><head><title>示例小说-第1章 示例章节</title></head>"
+                    "<body><div class='txtnav'><h1>第1章 示例章节</h1>"
+                    "<p>第一段正文。</p><p>(本章完)</p></div></body></html>"
+                )
+            }
+        )
+        plan = BookPlan(
+            title=SAMPLE_BOOK_TITLE,
+            catalog_url="https://www.69shuba.com/book/89702.htm",
+            chapters=(ChapterLink(1, "第1章 示例章节", chapter_url),),
+        )
+        with TemporaryDirectory() as temporary:
+            download_book(
+                client=client,
+                adapter=ShubaAdapter(),
+                plan=plan,
+                output=Path(temporary) / "out.txt",
+                output_dir=Path(temporary),
+                cache_root=Path(temporary) / "cache",
+                delay=0,
+                max_pages=5,
+                refresh=False,
+            )
+            expected_dir = (
+                Path(temporary) / "cache" / "69shuba" / cache_key(canonical_catalog)
+            )
+            plan_data = json.loads(
+                (expected_dir / "book.json").read_text(encoding="utf-8")
+            )
+            chapter_file = expected_dir / "chapters" / "000001.txt"
+            self.assertEqual(plan_data["catalog_url"], canonical_catalog)
+            self.assertTrue(chapter_file.is_file())
 
     def test_chapter_page_discovers_catalog(self):
         chapter_url = "https://www.trxs.cc/tongren/11699/147.html"

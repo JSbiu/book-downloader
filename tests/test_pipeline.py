@@ -388,6 +388,23 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertEqual([chapter.number for chapter in assembled], [1, 2])
 
+    def test_trxs_heading_detection_handles_junk_prefix_and_promo(self):
+        adapter = TrxsCcAdapter()
+        # 杂质前缀 + 推广语后缀
+        self.assertEqual(
+            adapter._real_heading("? 第106章 我没说要给你买啊（求月票~）"),
+            (106, "第106章 我没说要给你买啊"),
+        )
+        # 章号后紧贴名称
+        self.assertEqual(
+            adapter._real_heading("第32章「你好，江渝白！」"),
+            (32, "第32章 「你好，江渝白！」"),
+        )
+        # 无名称不是标题
+        self.assertIsNone(adapter._real_heading("第72章"))
+        # 句中提及不算标题
+        self.assertIsNone(adapter._real_heading("他翻到第3章才发现线索"))
+
     def test_verification_page_is_detected(self):
         self.assertTrue(looks_like_verification_page("<title>Just a moment...</title>"))
         self.assertTrue(looks_like_verification_page("正在进行安全验证，请稍候"))

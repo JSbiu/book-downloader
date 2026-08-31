@@ -9,9 +9,12 @@ from .discovery import discover_book
 from .errors import DownloaderError
 from .fallback import AutoSwitchHttpClient
 from .http import HttpClient
+from .library import LibraryEntry, load_library, match_entries
 from .runner import download_book
 from .search import SearchResult, search_sites
 from .sites.registry import adapter_for_url
+
+SOURCE_LABELS = {"cache": "缓存", "sidecar": "来源文件"}
 
 
 def positive_int(value: str) -> int:
@@ -76,6 +79,47 @@ def select_search_result(
     return results[selected - 1]
 
 
+def select_library_entry(matches: list[LibraryEntry]) -> LibraryEntry:
+    """命中唯一结果时直接选择；多本命中时交互选择。"""
+    if len(matches) == 1:
+        return matches[0]
+    for index, entry in enumerate(matches, start=1):
+        print(f"[{index}] {entry.title}（{entry.site}）")
+    while True:
+        try:
+            raw = input("匹配到多本书，请输入要更新的编号（输入 0 取消）：").strip()
+        except (EOFError, KeyboardInterrupt) as error:
+            raise DownloaderError("已取消选择更新目标") from error
+        if raw == "0":
+            raise DownloaderError("已取消选择更新目标")
+        try:
+            selected = int(raw)
+        except ValueError:
+            print("请输入编号。")
+            continue
+        if 1 <= selected <= len(matches):
+            return matches[selected - 1]
+        print(f"编号必须在 1 到 {len(matches)} 之间。")
+
+
+def print_library(entries: list[LibraryEntry]) -> None:
+    if not entries:
+        print("暂无已收录书目；先通过 URL 或 --search 下载一本书。")
+        return
+    print(f"已收录书目（{len(entries)} 本）")
+    for index, entry in enumerate(entries, start=1):
+        print(f"[{index}] {entry.title}")
+        print(f"    站点：{entry.site}")
+        if entry.cached_chapters is not None:
+            print(
+                f"    章节：目录 {entry.catalog_chapters} 章 / "
+                f"已缓存 {entry.cached_chapters} 章"
+            )
+        print(f"    目录：{entry.catalog_url}")
+        labels = "、".join(SOURCE_LABELS.get(source, source) for source in entry.sources)
+        print(f"    来源：{labels}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="从任意目录页或章节页发现并合并公开章节"
@@ -85,6 +129,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--search",
         metavar="QUERY",
         help="使用已纳入站点的公开站内搜索，然后选择下载结果",
+    )
+    parser.add_argument(
+        "--update",
+        metavar="关键词",
+        help="按书名关键词在已收录书目（缓存与来源文件）中查找并更新下载",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="列出已收录的书目（缓存与来源文件），不发起网络请求",
     )
     parser.add_argument(
         "--search-results",
@@ -164,12 +218,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    if bool(args.url) == bool(args.search):
-        parser.error("请提供小说 URL，或使用 --search 关键词（二选一）")
+    selected_modes = [
+        bool(args.url),
+        bool(args.search),
+        bool(args.update),
+        bool(args.list),
+    ]
+    if sum(selected_modes) != 1:
+        parser.error(
+            "请提供小说 URL，或使用 --search / --update 关键词，或 --list（四选一）"
+        )
     if args.search_result is not None and not args.search:
         parser.error("--search-result 只能和 --search 一起使用")
     if args.delay < 0 or args.timeout <= 0:
         parser.error("--delay 不能小于 0，--timeout 必须大于 0")
+
+    if args.list:
+        print_library(load_library(args.cache_root, args.output_dir))
+        return 0
 
     client = None
     try:
@@ -207,6 +273,16 @@ def main() -> int:
             else:
                 client = http_client
         source_url = args.url
+        if args.update:
+            entries = load_library(args.cache_root, args.output_dir)
+            matches = match_entries(entries, args.update)
+            if not matches:
+                raise DownloaderError(
+                    "没有找到匹配的书目；可用 --list 查看已收录的书，或直接提供目录 URL"
+                )
+            selected = select_library_entry(matches)
+            source_url = selected.catalog_url
+            print(f"已选择：{selected.title}（{selected.site}）")
         if args.search:
             results = search_sites(
                 client,

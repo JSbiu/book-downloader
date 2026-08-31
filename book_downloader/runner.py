@@ -197,6 +197,9 @@ def download_book(
         encoding="utf-8",
     )
     temporary_output.replace(output_path)
+    # 目录 URL 写进输出旁边的 .url 来源文件：缓存被清理后，--update 仍能找到更新入口。
+    sidecar_path = output_path.with_suffix(".url")
+    sidecar_path.write_text(f"{plan.catalog_url}\n", encoding="utf-8")
     return DownloadResult(
         output=output_path,
         total_chapters=len(blocks),

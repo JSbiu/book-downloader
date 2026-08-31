@@ -325,6 +325,17 @@ class PipelineTests(unittest.TestCase):
         title = TrxsCcAdapter().extract_book_title(soup, "https://www.trxs.cc/tongren/11699.html")
         self.assertEqual(title, SAMPLE_BOOK_TITLE)
 
+    def test_trxs_bare_section_title_becomes_chapter(self):
+        raw = Chapter(232, "第232节", "正文第一段。\n正文第二段。")
+        cleaned = TrxsCcAdapter().sanitize_chapter(raw, SAMPLE_BOOK_TITLE, False)
+        self.assertEqual(cleaned.title, "第232章")
+        self.assertEqual(cleaned.content, "正文第一段。\n正文第二段。")
+
+    def test_trxs_section_title_with_name_keeps_name(self):
+        raw = Chapter(5, "第5节 示例章节名", "正文第一段。")
+        cleaned = TrxsCcAdapter().sanitize_chapter(raw, SAMPLE_BOOK_TITLE, False)
+        self.assertEqual(cleaned.title, "第5节 示例章节名")
+
     def test_verification_page_is_detected(self):
         self.assertTrue(looks_like_verification_page("<title>Just a moment...</title>"))
         self.assertTrue(looks_like_verification_page("正在进行安全验证，请稍候"))

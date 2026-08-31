@@ -190,6 +190,10 @@ class TrxsCcAdapter(SiteAdapter):
         normalized_title = clean_lines(chapter.title)
         if normalized_title.startswith(book_title):
             normalized_title = normalized_title[len(book_title) :].strip(" ：:—-_")
+        # trxs 目录链接用"第N节"式纯编号，而章节页页眉写作"书名 第N章"；
+        # 光杆"第N节"统一成"第N章"，阅读器才能按章节识别（带名称的标题不动）。
+        if re.fullmatch(r"第\s*\d+\s*节", normalized_title):
+            normalized_title = re.sub(r"节\s*$", "章", normalized_title)
         for line in lines[:2]:
             if chapter_heading.match(line):
                 normalized_title = line

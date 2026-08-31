@@ -336,6 +336,58 @@ class PipelineTests(unittest.TestCase):
         cleaned = TrxsCcAdapter().sanitize_chapter(raw, SAMPLE_BOOK_TITLE, False)
         self.assertEqual(cleaned.title, "第5节 示例章节名")
 
+    def test_trxs_assembly_resegments_by_embedded_headings(self):
+        blocks = [
+            Chapter(1, "第1章 收租，然后遇见医学奇迹", "第一章正文。"),
+            Chapter(
+                2,
+                "第2章",
+                "第一章续文。\n第2章 没钱交房租的话，就给我当女仆还债好了\n第二章正文。",
+            ),
+            Chapter(
+                3,
+                "第3章",
+                "第二章续文。\n第3章 应该...不会再出什么意外了吧?\n第三章正文。",
+            ),
+            Chapter(4, "第4章", "第三章续文。"),
+            Chapter(5, "第5章", "无标记分页正文。"),
+        ]
+
+        assembled = TrxsCcAdapter().assemble_chapters(blocks, SAMPLE_BOOK_TITLE)
+
+        # 最后一个带名标题在分页 3；分页 4、5 在其后，各自成章续号
+        # （对应真实数据里第 71 章内容跨到下一分页被截断的既定代价）。
+        self.assertEqual(
+            [chapter.title for chapter in assembled],
+            [
+                "第1章 收租，然后遇见医学奇迹",
+                "第2章 没钱交房租的话，就给我当女仆还债好了",
+                "第3章 应该...不会再出什么意外了吧?",
+                "第4章",
+                "第5章",
+            ],
+        )
+        self.assertEqual([chapter.number for chapter in assembled], [1, 2, 3, 4, 5])
+        self.assertIn("第一章续文。", assembled[0].content)
+        self.assertNotIn("第二章正文。", assembled[0].content)
+        self.assertIn("第二章续文。", assembled[1].content)
+        self.assertIn("第三章正文。", assembled[2].content)
+        self.assertIn("第三章续文。", assembled[3].content)
+        self.assertIn("无标记分页正文。", assembled[4].content)
+
+    def test_trxs_assembly_without_embedded_headings_keeps_pages(self):
+        blocks = [
+            Chapter(1, "第1章", "正文一。"),
+            Chapter(2, "第2章", "正文二。"),
+        ]
+
+        assembled = TrxsCcAdapter().assemble_chapters(blocks, SAMPLE_BOOK_TITLE)
+
+        self.assertEqual(
+            [chapter.title for chapter in assembled], ["第1章", "第2章"]
+        )
+        self.assertEqual([chapter.number for chapter in assembled], [1, 2])
+
     def test_verification_page_is_detected(self):
         self.assertTrue(looks_like_verification_page("<title>Just a moment...</title>"))
         self.assertTrue(looks_like_verification_page("正在进行安全验证，请稍候"))

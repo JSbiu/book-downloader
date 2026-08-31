@@ -11,6 +11,11 @@ from ..models import Chapter, SiteSearchHit, SiteSearchRequest
 from .base import SiteAdapter
 from .common import absolute_url, clean_lines, extract_content
 
+# 正文里埋藏的真实章节标题："第N章 名称"（必须带名称，避免误伤正文）。
+# 名称与章号之间可能有空格，也可能直接紧贴（如"第32章「你好，江渝白！」"）。
+# trxs 的目录链接只是按字数分页的阅读页，不是章节边界。
+REAL_CHAPTER_HEADING = re.compile(r"^第\s*\d+\s*章\s*\S")
+
 
 class TrxsCcAdapter(SiteAdapter):
     name = "trxs_cc"
@@ -207,3 +212,78 @@ class TrxsCcAdapter(SiteAdapter):
             title=normalized_title,
             content=clean_lines("\n".join(lines)),
         )
+
+    def assemble_chapters(
+        self,
+        chapters: list[Chapter],
+        book_title: str,
+    ) -> tuple[Chapter, ...]:
+        del book_title
+        if not chapters:
+            return ()
+
+        # 目录链接是站点按字数切出的阅读分页，不是章节；真实章节标题
+        # （"第N章 名称"）埋在正文里。最后一个带名标题出现在哪个分页，
+        # 说明该分页之前 分页边界 ≠ 章节边界：光杆分页并入当前真实章节。
+        # 之后的分页在源站已无任何章节信息，按分页各自成章并接续编号；
+        # 全书都没有带名标题时退化为按分页分章。
+        last_named_block = -1
+        last_named_number = 0
+        for index, chapter in enumerate(chapters):
+            title_match = REAL_CHAPTER_HEADING.match(chapter.title or "")
+            if title_match:
+                last_named_block = index
+                last_named_number = max(
+                    last_named_number,
+                    int(re.match(r"^第\s*(\d+)\s*章", chapter.title).group(1)),
+                )
+            for line in chapter.content.splitlines():
+                match = REAL_CHAPTER_HEADING.match(line)
+                if match:
+                    last_named_block = index
+                    last_named_number = int(
+                        re.match(r"^第\s*(\d+)\s*章", line).group(1)
+                    )
+
+        assembled: list[Chapter] = []
+        current_title: str | None = None
+        current_lines: list[str] = []
+
+        def flush() -> None:
+            nonlocal current_title, current_lines
+            if not current_title:
+                return
+            assembled.append(
+                Chapter(
+                    number=len(assembled) + 1,
+                    title=current_title,
+                    content=clean_lines("\n".join(current_lines)),
+                )
+            )
+            current_lines = []
+
+        for index, chapter in enumerate(chapters):
+            title_match = REAL_CHAPTER_HEADING.match(chapter.title or "")
+            if title_match:
+                # 分页标题本身是被提升的真实章节标题（如第1章）。
+                flush()
+                current_title = chapter.title.strip()
+            elif index > last_named_block:
+                # 尾段：源站无章节信息，每个分页各自成章并接续编号。
+                flush()
+                last_named_number += 1
+                current_title = f"第{last_named_number}章"
+            # 其余光杆分页标题是分页产物，丢弃，内容并入当前章节。
+
+            for line in clean_lines(chapter.content).splitlines():
+                if REAL_CHAPTER_HEADING.match(line):
+                    flush()
+                    current_title = line.strip()
+                    continue
+                if current_title is None:
+                    # 第一个真实标题之前的正文（书籍介绍等），不进任何章节。
+                    continue
+                current_lines.append(line)
+
+        flush()
+        return tuple(assembled)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "book-downloader"
-version = "0.7.3"
+version = "0.7.4"
 description = "Downloader for publicly accessible, authorized book chapters"
 requires-python = ">=3.11"
 dependencies = [

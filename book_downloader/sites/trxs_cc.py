@@ -253,20 +253,34 @@ class TrxsCcAdapter(SiteAdapter):
 
         # 目录链接是站点按字数切出的阅读分页，不是章节；真实章节标题埋在
         # 正文里。最后一个带名标题出现在哪个分页，该分页之前的光杆分页
-        # 全部并入当前真实章节；之后的分页在源站已无章节信息，各自成章
-        # 并接续编号；全书都没有带名标题时退化为按分页分章。
+        # 全部并入当前真实章节。之后的分页通常不再有章节信息，但连载中的
+        # 书末页往往是最后一章的延续（实测真实章最多跨 3 个分页），
+        # 因此尾部在最大章节跨度内时并回最后一章，超出才各自成章续号。
+        heading_blocks: list[int] = []
         last_named_block = -1
         last_named_number = 0
         for index, chapter in enumerate(chapters):
             head = self._real_heading(chapter.title)
             if head:
                 last_named_block = index
+                heading_blocks.append(index)
                 last_named_number = max(last_named_number, head[0])
             for line in chapter.content.splitlines():
                 head = self._real_heading(line)
                 if head:
                     last_named_block = index
+                    heading_blocks.append(index)
                     last_named_number = max(last_named_number, head[0])
+        if not heading_blocks:
+            # 全书无埋入标题：按分页分章，每个分页都要独立成章。
+            max_span = -1
+        elif len(heading_blocks) == 1:
+            # 只有一个标题，无法实测跨度：退让一个分页作为章节延续。
+            max_span = 1
+        else:
+            max_span = max(
+                b - a for a, b in zip(heading_blocks, heading_blocks[1:])
+            )
 
         assembled: list[Chapter] = []
         current_title: str | None = None
@@ -291,8 +305,8 @@ class TrxsCcAdapter(SiteAdapter):
                 # 分页标题本身是被提升的真实章节标题。
                 flush()
                 current_title = head[1]
-            elif index > last_named_block:
-                # 尾段：源站无章节信息，每个分页各自成章并接续编号。
+            elif index > last_named_block + max_span:
+                # 尾部超出真实章节最大跨度：源站无章节信息，各自成章续号。
                 flush()
                 last_named_number += 1
                 current_title = f"第{last_named_number}章"

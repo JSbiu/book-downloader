@@ -355,8 +355,8 @@ class PipelineTests(unittest.TestCase):
 
         assembled = TrxsCcAdapter().assemble_chapters(blocks, SAMPLE_BOOK_TITLE)
 
-        # 最后一个带名标题在分页 3；分页 4、5 在其后，各自成章续号
-        # （对应真实数据里第 71 章内容跨到下一分页被截断的既定代价）。
+        # 最后一个带名标题在分页 3，真实章节跨度为 1 个分页：分页 4 在
+        # 跨度内并入第3章，分页 5 超出跨度才各自成章续号。
         self.assertEqual(
             [chapter.title for chapter in assembled],
             [
@@ -364,16 +364,27 @@ class PipelineTests(unittest.TestCase):
                 "第2章 没钱交房租的话，就给我当女仆还债好了",
                 "第3章 应该...不会再出什么意外了吧?",
                 "第4章",
-                "第5章",
             ],
         )
-        self.assertEqual([chapter.number for chapter in assembled], [1, 2, 3, 4, 5])
+        self.assertEqual([chapter.number for chapter in assembled], [1, 2, 3, 4])
         self.assertIn("第一章续文。", assembled[0].content)
         self.assertNotIn("第二章正文。", assembled[0].content)
         self.assertIn("第二章续文。", assembled[1].content)
-        self.assertIn("第三章正文。", assembled[2].content)
-        self.assertIn("第三章续文。", assembled[3].content)
-        self.assertIn("无标记分页正文。", assembled[4].content)
+        self.assertIn("第三章续文。", assembled[2].content)
+        self.assertIn("无标记分页正文。", assembled[3].content)
+
+    def test_trxs_assembly_merges_trailing_pages_of_last_chapter(self):
+        # 连载中书籍的末页往往只是最后一章的延续，不该被切成新章。
+        blocks = [
+            Chapter(1, "第1章 示例开头", "第一章正文。"),
+            Chapter(2, "第2章", "延续中的正文，对话还没结束，"),
+        ]
+
+        assembled = TrxsCcAdapter().assemble_chapters(blocks, SAMPLE_BOOK_TITLE)
+
+        self.assertEqual(len(assembled), 1)
+        self.assertEqual(assembled[0].title, "第1章 示例开头")
+        self.assertIn("延续中的正文", assembled[0].content)
 
     def test_trxs_assembly_without_embedded_headings_keeps_pages(self):
         blocks = [

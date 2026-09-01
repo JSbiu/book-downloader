@@ -10,7 +10,7 @@ from .errors import DownloaderError
 from .fallback import AutoSwitchHttpClient
 from .http import HttpClient
 from .library import LibraryEntry, load_library, match_entries
-from .runner import download_book
+from .runner import download_book, merge_from_cache
 from .search import SearchResult, search_sites
 from .sites.registry import adapter_for_url
 
@@ -120,6 +120,55 @@ def print_library(entries: list[LibraryEntry]) -> None:
         print(f"    来源：{labels}")
 
 
+def resolve_offline_catalog(args) -> str:
+    """离线模式下确定要合并的书：--update 用已收录记录，否则由 URL 推目录。"""
+    if args.update:
+        entries = load_library(args.cache_root, args.output_dir)
+        matches = match_entries(entries, args.update)
+        if not matches:
+            raise DownloaderError(
+                "没有找到匹配的书目；可用 --list 查看已收录的书，或直接提供目录 URL"
+            )
+        selected = select_library_entry(matches)
+        print(f"已选择：{selected.title}（{selected.site}）")
+        return selected.catalog_url
+    # 输入可能是章节页：用适配器的目录推断换成缓存记录的目录地址。
+    adapter = adapter_for_url(args.url)
+    return adapter.guess_catalog_url(args.url) or args.url
+
+
+def merge_offline(args) -> int:
+    """只用缓存重新合并：不创建任何 HTTP 客户端，不发起网络请求。"""
+    try:
+        catalog_url = resolve_offline_catalog(args)
+        adapter = adapter_for_url(catalog_url)
+        result = merge_from_cache(
+            adapter=adapter,
+            cache_root=args.cache_root,
+            catalog_url=adapter.canonical_catalog_url(catalog_url),
+            output=args.output,
+            output_dir=args.output_dir,
+            max_chapters=args.max_chapters,
+        )
+    except DownloaderError as error:
+        print(f"错误：{error}", file=sys.stderr)
+        return 1
+
+    print(f"已合并 {result.total_chapters} 章：{result.output}（离线）")
+    if result.skipped_chapters:
+        print(
+            f"本次按限制未处理 {result.skipped_chapters} 个章节；"
+            "去掉 --max-chapters 后可继续处理。"
+        )
+    if result.failed_chapters:
+        print(
+            f"未成功章节：{format_number_ranges(result.failed_chapters)}",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="从任意目录页或章节页发现并合并公开章节"
@@ -212,6 +261,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=180,
         help="等待浏览器验证完成的秒数",
     )
+    parser.add_argument(
+        "--merge-only",
+        action="store_true",
+        help="只用缓存重新合并输出，不发起任何网络请求（配合 URL 或 --update）",
+    )
     return parser
 
 
@@ -230,12 +284,17 @@ def main() -> int:
         )
     if args.search_result is not None and not args.search:
         parser.error("--search-result 只能和 --search 一起使用")
+    if args.merge_only and (args.search or args.list):
+        parser.error("--merge-only 只能和小说 URL 或 --update 一起使用")
     if args.delay < 0 or args.timeout <= 0:
         parser.error("--delay 不能小于 0，--timeout 必须大于 0")
 
     if args.list:
         print_library(load_library(args.cache_root, args.output_dir))
         return 0
+
+    if args.merge_only:
+        return merge_offline(args)
 
     client = None
     try:

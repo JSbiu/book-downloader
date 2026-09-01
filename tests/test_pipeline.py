@@ -9,9 +9,14 @@ from book_downloader.browser import same_target_document
 from book_downloader.cache import BookCache, cache_key
 from book_downloader.cli import format_number_ranges
 from book_downloader.discovery import discover_book
+from book_downloader.errors import DownloaderError
 from book_downloader.http import FetchedPage, looks_like_verification_page
 from book_downloader.models import BookPlan, Chapter, ChapterLink
-from book_downloader.runner import chapter_from_pages, download_book
+from book_downloader.runner import (
+    chapter_from_pages,
+    download_book,
+    merge_from_cache,
+)
 from book_downloader.sites.bixiange import BixiangeAdapter
 from book_downloader.sites.shuba import ShubaAdapter
 from book_downloader.sites.trxs_cc import TrxsCcAdapter
@@ -691,6 +696,98 @@ class PipelineTests(unittest.TestCase):
 
     def test_compact_failed_ranges(self):
         self.assertEqual(format_number_ranges((2, 3, 4, 8, 10, 11)), "2–4, 8, 10–11")
+
+    def test_merge_from_cache_uses_only_cache(self):
+        catalog_url = "https://www.trxs.cc/tongren/11699.html"
+        urls = [
+            f"https://www.trxs.cc/tongren/11699/{number}.html"
+            for number in range(1, 4)
+        ]
+        client = FakeClient(
+            {
+                urls[0]: chapter_html(1, "第一章正文内容足够长，用于下载。"),
+                urls[1]: chapter_html(2, "第二章正文内容足够长，用于下载。"),
+                urls[2]: chapter_html(3, "第三章正文内容足够长，用于下载。"),
+            }
+        )
+        plan = BookPlan(
+            title=SAMPLE_BOOK_TITLE,
+            catalog_url=catalog_url,
+            chapters=tuple(
+                ChapterLink(number, f"第{number}章", url)
+                for number, url in enumerate(urls, start=1)
+            ),
+        )
+
+        with TemporaryDirectory() as temporary:
+            cache_root = Path(temporary) / "cache"
+            download_book(
+                client=client,
+                adapter=TrxsCcAdapter(),
+                plan=plan,
+                output=Path(temporary) / "first.txt",
+                output_dir=Path(temporary),
+                cache_root=cache_root,
+                delay=0,
+                max_pages=5,
+                refresh=False,
+            )
+
+            class NoNetworkClient:
+                def fetch(self, url: str) -> FetchedPage:
+                    raise AssertionError("离线合并不应发起网络请求")
+
+            result = merge_from_cache(
+                adapter=TrxsCcAdapter(),
+                cache_root=cache_root,
+                catalog_url=catalog_url,
+                output=Path(temporary) / "offline.txt",
+                output_dir=Path(temporary),
+            )
+            text = result.output.read_text(encoding="utf-8")
+
+        self.assertEqual(result.total_chapters, 3)
+        self.assertEqual(result.failed_chapters, ())
+        self.assertIn("第一章正文内容", text)
+        self.assertIn("第三章正文内容", text)
+
+    def test_merge_from_cache_reports_missing_chapters(self):
+        catalog_url = "https://www.trxs.cc/tongren/11699.html"
+        with TemporaryDirectory() as temporary:
+            cache_root = Path(temporary) / "cache"
+            cache = BookCache(cache_root, "trxs_cc", catalog_url)
+            plan = BookPlan(
+                title=SAMPLE_BOOK_TITLE,
+                catalog_url=catalog_url,
+                chapters=(
+                    ChapterLink(1, "第1章", "https://www.trxs.cc/tongren/11699/1.html"),
+                    ChapterLink(2, "第2章", "https://www.trxs.cc/tongren/11699/2.html"),
+                ),
+            )
+            cache.save_plan(plan)
+            cache.write(Chapter(1, "第1章", "第一章正文内容。"))
+
+            result = merge_from_cache(
+                adapter=TrxsCcAdapter(),
+                cache_root=cache_root,
+                catalog_url=catalog_url,
+                output=Path(temporary) / "partial.txt",
+                output_dir=Path(temporary),
+            )
+
+        self.assertEqual(result.total_chapters, 1)
+        self.assertEqual(result.failed_chapters, ())
+
+    def test_merge_from_cache_without_plan_record_fails(self):
+        with TemporaryDirectory() as temporary:
+            with self.assertRaises(DownloaderError):
+                merge_from_cache(
+                    adapter=TrxsCcAdapter(),
+                    cache_root=Path(temporary) / "cache",
+                    catalog_url="https://www.trxs.cc/tongren/11699.html",
+                    output=Path(temporary) / "none.txt",
+                    output_dir=Path(temporary),
+                )
 
     def test_browser_target_matching_allows_normal_redirects_only(self):
         self.assertTrue(

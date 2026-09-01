@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -10,7 +12,7 @@ from bs4 import BeautifulSoup
 from .cache import BookCache
 from .errors import AccessBlockedError, DownloaderError
 from .http import HttpClient
-from .models import BookPlan, Chapter
+from .models import BookPlan, Chapter, ChapterLink
 from .sites.base import SiteAdapter
 
 
@@ -157,12 +159,46 @@ def download_book(
             if refresh or cache.read(link.number) is None:
                 failed.add(link.number)
 
+    return merge_cached_chapters(
+        adapter=adapter,
+        cache=cache,
+        plan=plan,
+        selected_chapters=selected_chapters,
+        output=output,
+        output_dir=output_dir,
+        failed=failed,
+        skipped_chapters=skipped_chapters,
+        interrupted=interrupted,
+    )
+
+
+def merge_cached_chapters(
+    *,
+    adapter: SiteAdapter,
+    cache: BookCache,
+    plan: BookPlan,
+    selected_chapters: tuple[ChapterLink, ...],
+    output: Path | None,
+    output_dir: Path,
+    failed: set[int],
+    skipped_chapters: int = 0,
+    interrupted: bool = False,
+    offline: bool = False,
+) -> DownloadResult:
+    """把缓存章节按当前净化规则重新处理并合并成 TXT。
+
+    重跑净化与分段规则都走这里，因此缓存内容不需要重新下载即可被
+    修正。offline=True 时不做任何网络请求：缺失的缓存只提示，不计失败。
+    """
     cleaned_chapters: list[Chapter] = []
     cleaned_cache_count = 0
+    missing: list[int] = []
     for link in selected_chapters:
         cached = cache.read_chapter(link.number)
         if cached is None:
-            if not interrupted:
+            if offline:
+                missing.append(link.number)
+            elif not interrupted:
                 failed.add(link.number)
             continue
         cleaned = adapter.sanitize_chapter(
@@ -177,6 +213,14 @@ def download_book(
 
     if cleaned_cache_count:
         print(f"已用当前净化规则更新 {cleaned_cache_count} 个缓存章节。")
+    if missing:
+        preview = "、".join(str(number) for number in missing[:10])
+        suffix = "…" if len(missing) > 10 else ""
+        print(
+            f"缓存缺失 {len(missing)} 章（{preview}{suffix}）；"
+            "去掉 --merge-only 重新运行可补齐后再合并。",
+            file=sys.stderr,
+        )
 
     assembled_chapters = adapter.assemble_chapters(
         cleaned_chapters,
@@ -211,4 +255,56 @@ def download_book(
         failed_chapters=tuple(sorted(failed)),
         skipped_chapters=skipped_chapters,
         interrupted=interrupted,
+    )
+
+
+def merge_from_cache(
+    *,
+    adapter: SiteAdapter,
+    cache_root: Path,
+    catalog_url: str,
+    output: Path | None,
+    output_dir: Path,
+    max_chapters: int | None = None,
+) -> DownloadResult:
+    """离线合并：只用缓存，不发起任何网络请求。"""
+    cache = BookCache(cache_root, adapter.name, catalog_url)
+    plan_path = cache.path / "book.json"
+    if not plan_path.is_file():
+        raise DownloaderError(
+            f"缓存里没有这本书的目录记录：{catalog_url}；请联网运行一次下载"
+        )
+    try:
+        data = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan = BookPlan(
+            title=str(data["title"]),
+            catalog_url=str(data["catalog_url"]),
+            chapters=tuple(
+                ChapterLink(
+                    number=int(item["number"]),
+                    title=str(item.get("title", "")),
+                    url=str(item.get("url", "")),
+                )
+                for item in data.get("chapters") or []
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise DownloaderError(f"缓存目录记录无法解析：{plan_path}（{error}）") from error
+    if not plan.chapters:
+        raise DownloaderError("缓存中的目录为空；请联网重新发现目录")
+
+    selected_chapters = (
+        plan.chapters if max_chapters is None else plan.chapters[:max_chapters]
+    )
+    skipped_chapters = len(plan.chapters) - len(selected_chapters)
+    return merge_cached_chapters(
+        adapter=adapter,
+        cache=cache,
+        plan=plan,
+        selected_chapters=selected_chapters,
+        output=output,
+        output_dir=output_dir,
+        failed=set(),
+        skipped_chapters=skipped_chapters,
+        offline=True,
     )

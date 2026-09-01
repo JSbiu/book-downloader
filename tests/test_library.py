@@ -171,6 +171,31 @@ class SelectLibraryEntryTests(unittest.TestCase):
                 select_library_entry([first, second])
 
 
+class MergeOnlyTests(unittest.TestCase):
+    def test_cli_rejects_merge_only_with_search(self):
+        from book_downloader.cli import main
+
+        with patch(
+            "sys.argv", ["book-downloader", "--search", "示例小说", "--merge-only"]
+        ):
+            with self.assertRaises(SystemExit):
+                main()
+
+    def test_resolve_offline_catalog_infers_catalog_from_chapter_url(self):
+        import argparse
+
+        from book_downloader.cli import resolve_offline_catalog
+
+        args = argparse.Namespace(
+            update=None,
+            url="https://www.trxs.cc/tongren/11699/232.html",
+        )
+        self.assertEqual(
+            resolve_offline_catalog(args),
+            "https://www.trxs.cc/tongren/11699.html",
+        )
+
+
 class SidecarTests(unittest.TestCase):
     def test_download_book_writes_source_sidecar(self):
         first_url = "https://www.trxs.cc/tongren/11699/1.html"

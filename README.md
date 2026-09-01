@@ -68,6 +68,17 @@ python -m book_downloader --update "示例小说"
 
 按书名关键词查找已收录的书（忽略空格和标点差异，完全一致的结果排最前；命中多本时列出编号供选择），然后重跑该书的下载流程：已完成章节继续使用缓存，只抓目录里新增的章节。查找来源是缓存 `book.json` 与输出目录的 `.url` 来源文件，同一目录 URL 两边都有记录时会合并展示。
 
+## 离线重新合并
+
+净化规则和章节分段规则更新后，不需要联网也能用现有缓存重新合并输出：
+
+```powershell
+python -m book_downloader --update "示例小说" --merge-only
+python -m book_downloader "https://www.trxs.cc/tongren/11699.html" --merge-only
+```
+
+`--merge-only` 不创建 HTTP 客户端、不发起任何网络请求，只用缓存里的目录记录和章节重新跑一遍净化与分段，再写出 TXT。适合站点限流（如 trxs.cc 高频后临时 403）时，先把手上的缓存合并成最新的结果。输入可以是目录页或章节页（会按适配器推断成目录地址）；缺失的缓存章节只提示不报错，去掉 `--merge-only` 重跑即可补齐。缓存里没有这本书的目录记录时会报错退出。
+
 可选参数：
 
 ```powershell

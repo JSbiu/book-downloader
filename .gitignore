@@ -1,8 +1,13 @@
 __pycache__/
 .pytest_cache/
 .venv/
-.agents/
+
+# Local agent context（三层机制第三层：.local/memory.md + .local/archive/）
+.local/
+
+# WorkBuddy 应用数据目录，非项目上下文
 .workbuddy/
+
 cache/
 outputs/
 *.pyc

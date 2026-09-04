@@ -10,7 +10,7 @@ from .errors import DownloaderError
 from .fallback import AutoSwitchHttpClient
 from .http import HttpClient
 from .library import LibraryEntry, load_library, match_entries
-from .runner import download_book, merge_from_cache
+from .runner import download_book, fill_cache_gaps, merge_from_cache
 from .search import SearchResult, search_sites
 from .sites.registry import adapter_for_url
 
@@ -137,6 +137,29 @@ def resolve_offline_catalog(args) -> str:
     return adapter.guess_catalog_url(args.url) or args.url
 
 
+def report_result(result, label: str = "") -> int:
+    suffix = f"（{label}）" if label else ""
+    print(f"已合并 {result.total_chapters} 章：{result.output}{suffix}")
+    if result.skipped_chapters:
+        print(
+            f"本次按限制未处理 {result.skipped_chapters} 个章节；"
+            "去掉 --max-chapters 后可继续处理。"
+        )
+    if result.failed_chapters:
+        missing = format_number_ranges(result.failed_chapters)
+        print(f"未成功章节：{missing}", file=sys.stderr)
+        print("重新运行相同命令即可利用缓存，只重试缺失章节。", file=sys.stderr)
+        return 2
+    if result.interrupted:
+        print(
+            "已响应 Ctrl+C，已完成章节已写入缓存和部分 TXT；"
+            "下次运行相同命令即可继续。",
+            file=sys.stderr,
+        )
+        return 130
+    return 0
+
+
 def merge_offline(args) -> int:
     """只用缓存重新合并：不创建任何 HTTP 客户端，不发起网络请求。"""
     try:
@@ -154,19 +177,31 @@ def merge_offline(args) -> int:
         print(f"错误：{error}", file=sys.stderr)
         return 1
 
-    print(f"已合并 {result.total_chapters} 章：{result.output}（离线）")
-    if result.skipped_chapters:
-        print(
-            f"本次按限制未处理 {result.skipped_chapters} 个章节；"
-            "去掉 --max-chapters 后可继续处理。"
+    return report_result(result, "离线")
+
+
+def fill_gaps(client, args) -> int:
+    """只补齐缓存缺失章节，然后重新合并。"""
+    try:
+        catalog_url = resolve_offline_catalog(args)
+        adapter = adapter_for_url(catalog_url)
+        result = fill_cache_gaps(
+            client=client,
+            adapter=adapter,
+            cache_root=args.cache_root,
+            catalog_url=adapter.canonical_catalog_url(catalog_url),
+            output=args.output,
+            output_dir=args.output_dir,
+            delay=args.delay,
+            max_pages=args.max_pages,
+            retry_delay=args.retry_delay,
+            retry_rounds=args.retry_rounds,
         )
-    if result.failed_chapters:
-        print(
-            f"未成功章节：{format_number_ranges(result.failed_chapters)}",
-            file=sys.stderr,
-        )
-        return 2
-    return 0
+    except DownloaderError as error:
+        print(f"错误：{error}", file=sys.stderr)
+        return 1
+
+    return report_result(result, "补齐缺口")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -266,6 +301,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="只用缓存重新合并输出，不发起任何网络请求（配合 URL 或 --update）",
     )
+    parser.add_argument(
+        "--fill-gaps",
+        action="store_true",
+        help="只补齐缓存中缺失的章节后重新合并（配合 URL 或 --update）",
+    )
+    parser.add_argument(
+        "--retry-delay",
+        type=float,
+        default=30.0,
+        help="补齐缺口时每轮重试前的等待秒数；默认 30",
+    )
+    parser.add_argument(
+        "--retry-rounds",
+        type=positive_int,
+        default=2,
+        help="补齐缺口时的额外重试轮数；默认 2",
+    )
     return parser
 
 
@@ -286,6 +338,12 @@ def main() -> int:
         parser.error("--search-result 只能和 --search 一起使用")
     if args.merge_only and (args.search or args.list):
         parser.error("--merge-only 只能和小说 URL 或 --update 一起使用")
+    if args.fill_gaps and (args.search or args.list):
+        parser.error("--fill-gaps 只能和小说 URL 或 --update 一起使用")
+    if args.merge_only and args.fill_gaps:
+        parser.error("--merge-only 与 --fill-gaps 不能同时使用")
+    if args.retry_delay < 0:
+        parser.error("--retry-delay 不能小于 0")
     if args.delay < 0 or args.timeout <= 0:
         parser.error("--delay 不能小于 0，--timeout 必须大于 0")
 
@@ -331,6 +389,8 @@ def main() -> int:
                 )
             else:
                 client = http_client
+        if args.fill_gaps:
+            return fill_gaps(client, args)
         source_url = args.url
         if args.update:
             entries = load_library(args.cache_root, args.output_dir)
@@ -382,22 +442,8 @@ def main() -> int:
         if client is not None:
             client.close()
 
-    print(f"已合并 {result.total_chapters} 章：{result.output}")
-    if result.skipped_chapters:
-        print(
-            f"本次按限制未处理 {result.skipped_chapters} 个章节；"
-            "去掉 --max-chapters 后可继续处理。"
-        )
-    if result.failed_chapters:
-        missing = format_number_ranges(result.failed_chapters)
-        print(f"未成功章节：{missing}", file=sys.stderr)
-        print("重新运行相同命令即可利用缓存，只重试缺失章节。", file=sys.stderr)
-        return 2
-    if result.interrupted:
-        print(
-            "已响应 Ctrl+C，已完成章节已写入缓存和部分 TXT；"
-            "下次运行相同命令即可继续。",
-            file=sys.stderr,
-        )
-        return 130
-    return 0
+    return report_result(result)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

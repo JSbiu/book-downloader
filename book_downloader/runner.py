@@ -30,6 +30,10 @@ def safe_filename(name: str) -> str:
     return value[:120] or "未命名小说"
 
 
+# 自检阈值：正文短于此值视为疑似残缺（正常章节远长于这个长度）。
+MIN_CHAPTER_CHARS = 50
+
+
 def chapter_from_pages(
     client: HttpClient,
     adapter: SiteAdapter,
@@ -172,6 +176,47 @@ def download_book(
     )
 
 
+def validate_assembled(chapters: list[Chapter]) -> list[str]:
+    """合并结果自检：编号连续性、重复标题、空章与疑似残缺章节。
+
+    分段与净化规则改坏时，这些问题会直接体现在输出里（历史上踩过
+    "第N节"重复编号、误切尾章两次），合并后立刻报出来比事后发现便宜。
+    """
+    findings: list[str] = []
+    for position, chapter in enumerate(chapters, start=1):
+        if chapter.number != position:
+            findings.append(
+                f"章节编号不连续：第 {position} 章位置上的编号是 {chapter.number}"
+            )
+            break
+
+    seen: dict[str, int] = {}
+    for chapter in chapters:
+        key = chapter.title.strip()
+        if key in seen:
+            findings.append(f"重复章节标题：{key}（第{seen[key]}、{chapter.number}章）")
+        else:
+            seen[key] = chapter.number
+
+    def preview(numbers: list[int]) -> str:
+        shown = "、".join(str(number) for number in numbers[:10])
+        return f"{shown}{'…' if len(numbers) > 10 else ''}"
+
+    empty = [c.number for c in chapters if not c.content.strip()]
+    if empty:
+        findings.append(f"空章节：{preview(empty)}")
+    short = [
+        c.number
+        for c in chapters
+        if 0 < len(c.content.strip()) < MIN_CHAPTER_CHARS
+    ]
+    if short:
+        findings.append(
+            f"疑似残缺章节（正文少于 {MIN_CHAPTER_CHARS} 字）：{preview(short)}"
+        )
+    return findings
+
+
 def merge_cached_chapters(
     *,
     adapter: SiteAdapter,
@@ -226,6 +271,8 @@ def merge_cached_chapters(
         cleaned_chapters,
         book_title=plan.title,
     )
+    for finding in validate_assembled(list(assembled_chapters)):
+        print(f"自检提示：{finding}", file=sys.stderr)
     blocks = [
         (chapter.number, chapter.block)
         for chapter in assembled_chapters
@@ -258,17 +305,13 @@ def merge_cached_chapters(
     )
 
 
-def merge_from_cache(
-    *,
-    adapter: SiteAdapter,
+def load_plan_from_cache(
+    cache: BookCache,
     cache_root: Path,
+    adapter: SiteAdapter,
     catalog_url: str,
-    output: Path | None,
-    output_dir: Path,
-    max_chapters: int | None = None,
-) -> DownloadResult:
-    """离线合并：只用缓存，不发起任何网络请求。"""
-    cache = BookCache(cache_root, adapter.name, catalog_url)
+) -> tuple[BookCache, BookPlan]:
+    """从缓存的目录记录重建 BookPlan；缓存里没有这本书时报错。"""
     plan_path = cache.path / "book.json"
     if not plan_path.is_file():
         raise DownloaderError(
@@ -289,9 +332,26 @@ def merge_from_cache(
             ),
         )
     except (KeyError, TypeError, ValueError) as error:
-        raise DownloaderError(f"缓存目录记录无法解析：{plan_path}（{error}）") from error
+        raise DownloaderError(
+            f"缓存目录记录无法解析：{plan_path}（{error}）"
+        ) from error
     if not plan.chapters:
         raise DownloaderError("缓存中的目录为空；请联网重新发现目录")
+    return cache, plan
+
+
+def merge_from_cache(
+    *,
+    adapter: SiteAdapter,
+    cache_root: Path,
+    catalog_url: str,
+    output: Path | None,
+    output_dir: Path,
+    max_chapters: int | None = None,
+) -> DownloadResult:
+    """离线合并：只用缓存，不发起任何网络请求。"""
+    cache = BookCache(cache_root, adapter.name, catalog_url)
+    cache, plan = load_plan_from_cache(cache, cache_root, adapter, catalog_url)
 
     selected_chapters = (
         plan.chapters if max_chapters is None else plan.chapters[:max_chapters]
@@ -306,5 +366,82 @@ def merge_from_cache(
         output_dir=output_dir,
         failed=set(),
         skipped_chapters=skipped_chapters,
+        offline=True,
+    )
+
+
+def fill_cache_gaps(
+    *,
+    client: HttpClient,
+    adapter: SiteAdapter,
+    cache_root: Path,
+    catalog_url: str,
+    output: Path | None,
+    output_dir: Path,
+    delay: float,
+    max_pages: int,
+    retry_delay: float = 30.0,
+    retry_rounds: int = 2,
+) -> DownloadResult:
+    """只补齐缓存里缺失的章节，然后重新合并。
+
+    站点验证页或限流会让一次下载在中段中断，留下连续缺口。这里跳过已有
+    缓存的章节，只请求缺失部分；失败时按轮次退避重试（浏览器模式下等待
+    人工验证），因此可反复运行直到补齐。
+    """
+    cache = BookCache(cache_root, adapter.name, catalog_url)
+    cache, plan = load_plan_from_cache(cache, cache_root, adapter, catalog_url)
+
+    pending = [
+        link for link in plan.chapters if cache.read(link.number) is None
+    ]
+    if not pending:
+        print("缓存没有缺失章节；直接重新合并。")
+    else:
+        print(f"待补齐 {len(pending)} 章（{pending[0].number}–{pending[-1].number}）。")
+
+    failed: set[int] = set()
+    for round_index in range(retry_rounds + 1):
+        if round_index and failed:
+            print(f"等待 {retry_delay:.0f} 秒后重试 {len(failed)} 个失败章节……")
+            time.sleep(retry_delay)
+        still_failed: set[int] = set()
+        for index, link in enumerate(pending, start=1):
+            try:
+                print(f"[{index}/{len(pending)}] {link.title}：{link.url}")
+                chapter = chapter_from_pages(
+                    client=client,
+                    adapter=adapter,
+                    link=link,
+                    book_title=plan.title,
+                    max_pages=max_pages,
+                )
+                cache.write(chapter)
+                if delay and index < len(pending):
+                    time.sleep(delay)
+            except AccessBlockedError as error:
+                print(f"  已停止本轮：{error}")
+                still_failed.update(link.number for link in pending[index - 1:])
+                break
+            except DownloaderError as error:
+                print(f"  跳过：{error}")
+                still_failed.add(link.number)
+            except KeyboardInterrupt:
+                print("检测到 Ctrl+C，已停止补齐；已完成章节保留在缓存。")
+                still_failed.update(link.number for link in pending[index - 1:])
+                break
+        failed = still_failed
+        if not failed:
+            break
+        pending = [link for link in pending if link.number in failed]
+
+    return merge_cached_chapters(
+        adapter=adapter,
+        cache=cache,
+        plan=plan,
+        selected_chapters=plan.chapters,
+        output=output,
+        output_dir=output_dir,
+        failed=set(),
         offline=True,
     )

@@ -9,13 +9,15 @@ from book_downloader.browser import same_target_document
 from book_downloader.cache import BookCache, cache_key
 from book_downloader.cli import format_number_ranges
 from book_downloader.discovery import discover_book
-from book_downloader.errors import DownloaderError
+from book_downloader.errors import AccessBlockedError, DownloaderError
 from book_downloader.http import FetchedPage, looks_like_verification_page
 from book_downloader.models import BookPlan, Chapter, ChapterLink
 from book_downloader.runner import (
     chapter_from_pages,
     download_book,
+    fill_cache_gaps,
     merge_from_cache,
+    validate_assembled,
 )
 from book_downloader.sites.bixiange import BixiangeAdapter
 from book_downloader.sites.shuba import ShubaAdapter
@@ -814,6 +816,114 @@ class PipelineTests(unittest.TestCase):
                 "https://www.google.com/search?q=test",
             )
         )
+
+
+class FillGapsTests(unittest.TestCase):
+    def make_plan(self, catalog_url: str, count: int = 3) -> BookPlan:
+        return BookPlan(
+            title=SAMPLE_BOOK_TITLE,
+            catalog_url=catalog_url,
+            chapters=tuple(
+                ChapterLink(
+                    number,
+                    f"第{number}章",
+                    f"https://www.trxs.cc/tongren/11699/{number}.html",
+                )
+                for number in range(1, count + 1)
+            ),
+        )
+
+    def test_fill_gaps_only_requests_missing_chapters(self):
+        catalog_url = "https://www.trxs.cc/tongren/11699.html"
+        with TemporaryDirectory() as temporary:
+            cache_root = Path(temporary) / "cache"
+            cache = BookCache(cache_root, "trxs_cc", catalog_url)
+            plan = self.make_plan(catalog_url)
+            cache.save_plan(plan)
+            cache.write(Chapter(1, "第1章", "第一章正文内容，已缓存。"))
+            cache.write(Chapter(3, "第3章", "第三章正文内容，已缓存。"))
+
+            client = FakeClient(
+                {
+                    "https://www.trxs.cc/tongren/11699/2.html": chapter_html(
+                        2, "第二章正文内容，用于补齐。"
+                    ),
+                }
+            )
+            result = fill_cache_gaps(
+                client=client,
+                adapter=TrxsCcAdapter(),
+                cache_root=cache_root,
+                catalog_url=catalog_url,
+                output=Path(temporary) / "filled.txt",
+                output_dir=Path(temporary),
+                delay=0,
+                max_pages=5,
+                retry_delay=0,
+                retry_rounds=0,
+            )
+            text = result.output.read_text(encoding="utf-8")
+
+        self.assertEqual(client.fetched, ["https://www.trxs.cc/tongren/11699/2.html"])
+        self.assertEqual(result.total_chapters, 3)
+        self.assertIn("第二章正文内容", text)
+
+    def test_fill_gaps_retries_blocked_rounds(self):
+        catalog_url = "https://www.trxs.cc/tongren/11699.html"
+
+        class BlockedClient(FakeClient):
+            def __init__(self):
+                super().__init__({})
+                self.calls = 0
+
+            def fetch(self, url: str) -> FetchedPage:
+                self.calls += 1
+                raise AccessBlockedError("站点要求验证")
+
+        client = BlockedClient()
+        with TemporaryDirectory() as temporary:
+            cache_root = Path(temporary) / "cache"
+            cache = BookCache(cache_root, "trxs_cc", catalog_url)
+            plan = self.make_plan(catalog_url, count=2)
+            cache.save_plan(plan)
+            cache.write(Chapter(1, "第1章", "第一章正文内容，已缓存。"))
+
+            result = fill_cache_gaps(
+                client=client,
+                adapter=TrxsCcAdapter(),
+                cache_root=cache_root,
+                catalog_url=catalog_url,
+                output=Path(temporary) / "blocked.txt",
+                output_dir=Path(temporary),
+                delay=0,
+                max_pages=5,
+                retry_delay=0,
+                retry_rounds=2,
+            )
+
+        self.assertEqual(client.calls, 3)
+        self.assertEqual(result.total_chapters, 1)
+
+
+class AssembledValidationTests(unittest.TestCase):
+    def test_clean_book_has_no_findings(self):
+        chapters = [
+            Chapter(1, "第1章 开头", f"{'正文内容' * 20}，足够长的第一段。"),
+            Chapter(2, "第2章 继续", f"{'正文内容' * 20}，足够长的第二段。"),
+        ]
+        self.assertEqual(validate_assembled(chapters), [])
+
+    def test_validation_reports_duplicate_and_short_chapters(self):
+        chapters = [
+            Chapter(1, "第1章 开头", f"{'正文内容' * 20}，足够长。"),
+            Chapter(2, "第1章 开头", f"{'正文内容' * 20}，标题重复。"),
+            Chapter(4, "第4章 跳号", "太短。"),
+        ]
+        findings = validate_assembled(chapters)
+        joined = "\n".join(findings)
+        self.assertIn("重复章节标题", joined)
+        self.assertIn("章节编号不连续", joined)
+        self.assertIn("疑似残缺章节", joined)
 
 
 if __name__ == "__main__":

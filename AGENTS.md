@@ -1,8 +1,15 @@
 # 项目规则 — book-downloader
 
+## 协作与文档分工
+
+- 开始工作时读取本文件及根目录 `.local/memory.md`（如存在），再按任务范围查阅 README 和相关文件。
+- 用户级 AGENTS.md 保存跨项目规则；本文件保存项目导航与技术约束；本机记忆不覆盖当前用户指令或适用的 AGENTS.md。
+- README 和项目文档保存已核验的共享知识；需求范围、进度、验收与待办放在对应需求或交付文档。本机记忆保留个人偏好、环境事实和必要入口。
+- 长任务按需使用 `.local/checkpoints/`，历史过程放 `.local/archive/`；先沉淀稳定知识，再收敛记忆。易变事实标明日期、范围与来源，旧验证不代表本轮验证。
+- Git 操作遵循当前用户级约定：提供本次精确文件的 add/commit 命令，由用户执行；不沿用历史记忆中的自动提交或推送授权。保留已有暂存、未暂存及未跟踪改动。
+
 ## 项目定位与运行环境
-- 项目根：`D:\workspace\Projects\book-downloader`
-- Windows-first 工作流；优先使用 PowerShell 与 bundled managed Python runtime。
+- Windows-first 工作流，使用 PowerShell；Python 版本与依赖以 pyproject.toml 和 requirements.txt 为准，本机运行时位置见 .local/memory.md。
 - 下载章节缓存与合并 TXT 输出尽量放在版本控制之外的目录。
 
 ## 目录与结构
@@ -35,9 +42,9 @@
 - 不实现自动绕过 Cloudflare / Turnstile / 验证码；人工验证辅助是唯一路径。
 
 ## 版本与提交
-- 完成一批实质工作后主动整理提交并推送（用户已授权，见全局 `AGENTS.md`）。
+- Git 提交与推送遵循上方协作约定，不从旧记录推导当前授权。
 - `pyproject.toml` 的 version 随提交同步：feat→minor，fix→patch，破坏性→major；同版本多 commit 只更新一次。
 - 中文 conventional commit，按功能拆分。
 
 ## 测试
-- 系统 Python：`D:\dev\python\python.exe -m unittest discover -s tests -v`（managed Python 未装 bs4 / requests / playwright）。
+- 测试入口见 README：`python -m unittest discover -s tests -v`。确认解释器与依赖后执行，优先使用离线夹具；文档修改只检查相关内容、链接和差异。

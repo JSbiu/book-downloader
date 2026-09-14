@@ -4,6 +4,10 @@
 
 项目只请求公开 HTML，不处理登录、验证码、付费墙、隐藏下载接口或反爬验证。遇到 Cloudflare 真人验证时会停止并提示，不会模拟或绕过验证。
 
+## 协作入口
+
+项目规则见 [AGENTS.md](AGENTS.md)。本机偏好与必要上下文位于 `.local/memory.md`（如存在），历史记录按需放在 `.local/archive/` 或 `.local/checkpoints/`，均不进入 Git。共享知识与具体需求记录以项目文档为准。
+
 ## 安装
 
 ```powershell
@@ -141,7 +145,7 @@ python -m book_downloader "https://www.trxs.cc/tongren/11699/147.html" --output 
 要让 69shuba 搜索能用，需要让搜索走真实浏览器：
 
 ```powershell
-python -m book_downloader --browser --search "以一龙之力打倒整个世界"
+python -m book_downloader --browser --search "示例小说"
 ```
 
 或者用 `--browser-connect` 接真实浏览器。不带地址时脚本会自动处理：
@@ -150,14 +154,14 @@ python -m book_downloader --browser --search "以一龙之力打倒整个世界"
 日常浏览），无需手动操作：
 
 ```powershell
-python -m book_downloader --browser-connect --search "以一龙之力打倒整个世界"
+python -m book_downloader --browser-connect --search "示例小说"
 ```
 
 也可以显式指定你自己开的 Chrome：
 
 ```powershell
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="D:\workspace\Projects\book-downloader\cache\normal-chrome"
-python -m book_downloader --browser-connect http://127.0.0.1:9222 --search "以一龙之力打倒整个世界"
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="$PWD\cache\normal-chrome"
+python -m book_downloader --browser-connect http://127.0.0.1:9222 --search "示例小说"
 ```
 
 流程：脚本打开 69shuba 首页建立会话→ 填表提交搜索 → Cloudflare 可能
@@ -196,7 +200,7 @@ python -m book_downloader --browser "http://www.23txxt.com/bqg/111084/44601734_2
 
 ```powershell
 $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-& $chrome --remote-debugging-port=9222 --user-data-dir="D:\workspace\Projects\book-downloader\cache\normal-chrome"
+& $chrome --remote-debugging-port=9222 --user-data-dir="$PWD\cache\normal-chrome"
 ```
 
 在这个 Chrome 窗口中打开链接并手动完成验证，然后保持窗口不关闭，另开

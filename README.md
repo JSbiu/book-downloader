@@ -1,36 +1,89 @@
 # book-downloader
 
+书页 Chrome 插件的焕新方案见 [焕新计划](docs/renewal.md)，工程样机安装与范围见 [样机说明](extension/README.md)。以下保留旧版使用说明。
+
 从一个小说 URL 或已纳入站点的站内搜索结果自动发现目录、抓取章节并合并为 UTF-8 TXT。输入可以是目录页，也可以是任意章节页；程序会尝试从章节页找到目录链接，或者根据已知站点的 URL 结构推断目录页。
 
 项目只请求公开 HTML，不处理登录、验证码、付费墙、隐藏下载接口或反爬验证。遇到 Cloudflare 真人验证时会停止并提示，不会模拟或绕过验证。
 
+
+## 本地 Web 界面
+
+首次准备可选依赖（Ubuntu-22.04 项目终端）：
+
+```bash
+uv pip install --python .venv/bin/python -e '.[web,browser]'
+```
+
+之后双击仓库中的 `启动书页.cmd`，或在项目终端执行：
+
+```bash
+.venv/bin/python -m book_downloader.web --open
+```
+
+页面地址为 <http://127.0.0.1:8765>，只监听本机。启动器会复用已运行的同项目后台，端口属于其他服务时明确报错，不会连接未知服务。Windows 桌面快捷方式可通过运行 `scripts/install-web-shortcut.ps1` 创建（右键使用 PowerShell 运行）；启动脚本与快捷方式使用本机约定的 Ubuntu-22.04 和项目路径。
+
+- **书架**：更新目录并下载、补齐缺口、从缓存重新生成 TXT、下载 TXT。只有来源记录而无缓存目录时，先点击更新下载。
+- **删除书籍**：书架点击“删除”，默认仅从 Web 书架移除并保留文件，重新添加同一链接可恢复。勾选“同时永久删除”才会清理确认框列出的缓存目录（含旧缓存）、TXT 和来源文件；任务历史保留，无法识别归属的文件不清理。若清理中途失败，书目会以“待清理”状态保留，重新确认后从已记录的范围继续；完成前不能重新下载该书。有排队、执行中或尚未确定目录目标的任务时，请先停止并等待结束。
+- **添加下载**：粘贴目录或章节链接，或搜索书名关键词并选择结果。多站搜索先展示已找到的结果；可继续选书加入队列，也可结束剩余搜索并保留结果，随后执行下载。任务逐本排队，重复点击不会重复提交同一个活动任务。
+- **任务中心**：查看当前进度、缺失项、自检告警和可展开详情。目录项/缓存项统计站点分页，合并后的真实章节数量另行展示。
+- **人工验证**：默认使用当前 Chrome/Edge 的任务标签页。点击页面右上角“连接当前浏览器”，按说明安装本地扩展并授权一次；连接后搜索和验证自动在新标签页进行，手动验证后继续，关闭书页不停止任务。后台重启后刷新书页重新连接。可在高级设置切换为独立 WSL 浏览器；新启动的 WSL 浏览器会引用 Windows 已有中文字体。HTTP 403 等拒绝访问不统一认定为验证码。浏览器显示“不支持安全连接”等内部提示时，任务保持当前标签页等待，用户自行决定是否继续；等待可停止，超时后不会自动跳回首页。页面可区分未连接、未授权、旧版扩展与已连接，并提供“前往任务标签页”。
+- **停止与恢复**：停止后不再启动下一请求；进行中的请求允许返回或超时，已完成缓存保留，有可用内容时生成部分 TXT。补齐重试和验证等待均响应停止。关闭网页不退出后台；停止整个后台使用页面左下角“退出后台”。服务重启后未完成任务标为中断/暂停，由用户点击重试，不自动恢复网络请求。
+
+设置中的输出目录、间隔、超时、重试和浏览器路径保存在 `.local/web/settings.json`，任务记录与日志也位于 `.local/web/`。每个任务保存自己的设置快照，普通重试沿用原设置；保存的新设置与原任务不同时，可明确选择“按当前设置重试”，不会修改原任务记录。缓存继续使用项目 `cache/`，输出默认使用 `outputs/`，不会迁移现有缓存。不要从 CLI 和 Web 同时修改同一本书的缓存。
+
+TXT 可能是部分结果：下载/补缺未完成和离线合并缺章都会在页面明确标注。损坏 UTF-8 缓存保留并提供备份/移走后补抓的建议。历史上如果目录 URL 已被覆盖为新地址、正文却仍是旧内容，现有元数据无法自动判别，需要按已知来源恢复或重新下载。
+
+Web 测试需要可选测试依赖：
+
+```bash
+uv pip install --python .venv/bin/python -e '.[web,browser,test]'
+python -m unittest discover -s tests -v
+BOOK_DOWNLOADER_UI_TESTS=1 python -m unittest tests.test_web_ui tests.test_extension_ui -v
+```
+
+页面端到端测试使用临时目录与离线站点夹具，不访问真实书籍。CLI 本身不要求安装 Web 依赖；未安装时可只运行原有测试模块。
+
+## 本机开发（WSL）
+
+在 VS Code 的 Ubuntu-22.04 窗口中打开项目，使用 `.venv/bin/python`。安装依赖后激活环境，后文的普通 Python 命令在此终端执行：
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -e '.[browser]'
+source .venv/bin/activate
+```
+
+已有环境直接激活。F5 的默认入口为 `python -m book_downloader --list`，查看本地收录目录。
+WSL 浏览器模式使用 Linux 浏览器。后文明确使用 Windows Chrome 的 PowerShell 示例，其浏览器和 Python 均在 Windows 中执行；两套环境的 localhost 和浏览器配置不共用。
+
 ## 协作入口
 
-项目规则见 [AGENTS.md](AGENTS.md)。本机偏好与必要上下文位于 `.local/memory.md`（如存在），历史记录按需放在 `.local/archive/` 或 `.local/checkpoints/`，均不进入 Git。共享知识与具体需求记录以项目文档为准。
+项目规则见 [AGENTS.md](AGENTS.md)。本机偏好与必要上下文位于 `.local/memory.md`（由 `AGENTS.md` 导入），不进入 Git。共享知识与具体需求记录以项目文档为准。
 
 ## 安装
 
-```powershell
-python -m pip install -r requirements.txt
+```bash
+uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
 ## 使用
 
 只需要提供一个 URL：
 
-```powershell
+```bash
 python -m book_downloader "https://www.trxs.cc/tongren/11699/147.html"
 ```
 
 也可以传目录页：
 
-```powershell
+```bash
 python -m book_downloader "https://www.trxs.cc/tongren/11699.html"
 ```
 
 也可以直接调用已纳入站点的公开站内搜索，再从结果中选择下载：
 
-```powershell
+```bash
 python -m book_downloader --search "示例小说"
 ```
 
@@ -60,13 +113,13 @@ python -m book_downloader --search "示例小说"
 
 ## 已收录书目与更新
 
-```powershell
+```bash
 python -m book_downloader --list
 ```
 
 列出缓存与来源文件中已收录的书目（书名、站点、目录/已缓存章节数），不发起网络请求。
 
-```powershell
+```bash
 python -m book_downloader --update "示例小说"
 ```
 
@@ -76,7 +129,7 @@ python -m book_downloader --update "示例小说"
 
 净化规则和章节分段规则更新后，不需要联网也能用现有缓存重新合并输出：
 
-```powershell
+```bash
 python -m book_downloader --update "示例小说" --merge-only
 python -m book_downloader "https://www.trxs.cc/tongren/11699.html" --merge-only
 ```
@@ -85,7 +138,7 @@ python -m book_downloader "https://www.trxs.cc/tongren/11699.html" --merge-only
 
 ## 补齐缺口
 
-```powershell
+```bash
 python -m book_downloader --update "示例小说" --fill-gaps
 python -m book_downloader "http://www.23txxt.com/bqg/111797/" --fill-gaps --delay 2
 ```
@@ -98,8 +151,8 @@ python -m book_downloader "http://www.23txxt.com/bqg/111797/" --fill-gaps --dela
 
 可选参数：
 
-```powershell
-python -m book_downloader "https://www.trxs.cc/tongren/11699/147.html" --output .\outputs\11699.txt --delay 1 --timeout 20 --retries 3 --max-pages 50
+```bash
+python -m book_downloader "https://www.trxs.cc/tongren/11699/147.html" --output ./outputs/11699.txt --delay 1 --timeout 20 --retries 3 --max-pages 50
 ```
 
 - `--refresh`：忽略章节缓存，重新抓取
@@ -144,7 +197,7 @@ python -m book_downloader "https://www.trxs.cc/tongren/11699/147.html" --output 
 
 要让 69shuba 搜索能用，需要让搜索走真实浏览器：
 
-```powershell
+```bash
 python -m book_downloader --browser --search "示例小说"
 ```
 
@@ -153,7 +206,7 @@ python -m book_downloader --browser --search "示例小说"
 有就复用；没有则自动启动默认浏览器（Chrome/Edge，独立配置目录，不影响
 日常浏览），无需手动操作：
 
-```powershell
+```bash
 python -m book_downloader --browser-connect --search "示例小说"
 ```
 
@@ -181,19 +234,23 @@ python -m book_downloader --browser-connect http://127.0.0.1:9222 --search "示�
 
 先安装可选依赖：
 
-```powershell
-python -m pip install "playwright>=1.40"
+```bash
+uv pip install --python .venv/bin/python "playwright>=1.40"
 ```
 
 运行（也适用于站内搜索模式）：
 
-```powershell
-python -m book_downloader --browser "http://www.23txxt.com/bqg/111084/44601734_2.html" --output .\outputs\111084.txt
+```bash
+python -m book_downloader --browser "http://www.23txxt.com/bqg/111084/44601734_2.html" --output ./outputs/111084.txt
 ```
 
-浏览器会话默认保存在 `cache/browser-profile/`，后续运行可复用。若没有
-自动找到浏览器，可用 `--browser-executable` 指定 `chrome.exe` 或
-`msedge.exe` 的完整路径。
+浏览器会话默认保存在 `cache/browser-profile/`，后续运行可复用。
+自动发现会先从 `PATH` 中依次查找 `chrome`、`google-chrome`、
+`google-chrome-stable`、`chromium`、`chromium-browser`、`microsoft-edge`，
+随后查找 Windows 常见安装位置、已启动 Playwright 报告的 Chromium 路径，
+最后查找 Linux/WSL 的 `~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome`。
+若没有自动找到浏览器，可用 `--browser-executable` 指定当前环境中浏览器
+可执行文件的完整路径；该参数优先于自动查找。
 
 如果 `--browser` 打开的浏览器一直停在安全验证页，说明站点可能识别出了
 自动化启动方式。此时可以让你自己启动普通 Chrome，再让脚本连接它：
@@ -206,12 +263,16 @@ $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
 在这个 Chrome 窗口中打开链接并手动完成验证，然后保持窗口不关闭，另开
 终端运行：
 
-```powershell
-python -m book_downloader --browser-connect http://127.0.0.1:9222 "http://www.23txxt.com/bqg/111084/44601734_2.html" --output .\outputs\111084.txt
+```bash
+python -m book_downloader --browser-connect http://127.0.0.1:9222 "http://www.23txxt.com/bqg/111084/44601734_2.html" --output ./outputs/111084.txt
 ```
 
 `--browser-connect` 也可以不带地址：脚本自动探测已开的调试端口并复用，
 没有则自动启动默认浏览器，不需要手动操作。
+
+连接时会跳过已有的 `chrome://`、`chrome-extension://`、`about:` 等非 HTTP(S)
+页面，优先复用普通网页；没有则新建标签页。标签页关闭后也会按相同规则恢复。
+自动启动浏览器时会带上 `--no-first-run --no-default-browser-check`，减少停在欢迎页的情况。
 
 ## 站点适配
 
@@ -236,7 +297,7 @@ python -m book_downloader --browser-connect http://127.0.0.1:9222 "http://www.23
 
 ## 测试
 
-```powershell
+```bash
 python -m unittest discover -s tests -v
 ```
 

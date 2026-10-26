@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "书页 · 当前浏览器连接",
+  "description": "让本地书页在当前浏览器的独立任务标签页搜索和读取公开章节。人工验证由你完成。",
+  "version": "1.0.1",
+  "permissions": ["scripting", "storage", "alarms"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "content_scripts": [{"matches": ["http://127.0.0.1/*", "http://localhost/*"], "js": ["connect.js"]}],
+  "action": {"default_popup": "popup.html", "default_title": "连接书页"}
+}

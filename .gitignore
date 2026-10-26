@@ -1,8 +1,9 @@
 __pycache__/
 .pytest_cache/
 .venv/
+*.egg-info/
 
-# Local agent context（三层机制第三层：.local/memory.md + .local/archive/）
+# 本机个人上下文 / 项目记忆（.local/memory.md），不进 Git
 .local/
 
 # WorkBuddy 应用数据目录，非项目上下文

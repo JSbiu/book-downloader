@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>书架 · book-downloader</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <p id="app-status" class="sr-only" role="status" aria-live="polite"></p>
+
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">书</span>
+        <span class="brand-copy">
+          <span class="brand-name">book-downloader</span>
+          <span class="brand-sub">本地书库</span>
+        </span>
+      </div>
+
+      <nav class="nav" aria-label="主导航">
+        <button type="button" class="nav-item" data-view="books" aria-current="page">
+          <span class="nav-label">书架</span>
+          <span class="nav-count" id="books-count" hidden></span>
+        </button>
+        <button type="button" class="nav-item" data-view="add">
+          <span class="nav-label">添加下载</span>
+        </button>
+        <button type="button" class="nav-item" data-view="tasks">
+          <span class="nav-label">任务中心</span>
+          <span class="nav-count" id="tasks-badge" hidden></span>
+        </button>
+        <span class="nav-divider" aria-hidden="true"></span>
+        <button type="button" class="nav-item nav-item-quiet" data-view="settings">
+          <span class="nav-label">设置</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="conn" id="conn-status" data-state="connecting">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="conn-text">连接中…</span>
+        </div>
+        <button type="button" class="btn btn-quiet btn-sm" id="shutdown-btn">退出后台</button>
+      </div>
+    </aside>
+
+    <div class="main-wrap">
+      <header class="topbar">
+        <div class="topbar-copy">
+          <p class="eyebrow">本地书库工具</p>
+          <h1 id="view-title">书架</h1>
+          <p class="subtitle" id="view-subtitle">管理已缓存的书籍与合并输出。</p>
+        </div>
+        <div class="topbar-side">
+          <a href="browser-extension.html" target="_blank" rel="noopener" class="btn btn-sm" id="browser-extension-status">连接当前浏览器</a>
+          <span class="status-chip" id="server-status" data-state="connecting" role="status" aria-live="polite">连接中…</span>
+        </div>
+      </header>
+
+      <main id="main" tabindex="-1">
+        <div class="banner banner-warn" id="connection-banner" role="status" hidden>
+          <span class="banner-text">无法连接后台服务。界面已保留，正在自动重试；也可手动重试。</span>
+          <button type="button" class="btn btn-sm" id="retry-connection">重试</button>
+        </div>
+
+        <div class="banner banner-warn" id="storage-warning" role="alert" hidden></div>
+
+        <!-- 书架 -->
+        <section class="view" id="view-books" aria-labelledby="books-heading">
+          <div class="section-head">
+            <div class="section-copy">
+              <h2 id="books-heading">已下载书籍</h2>
+              <p class="section-note">统计当前目录中已缓存的条目；阅读分页可能重新合并成章节，实际章节数以任务结果为准。</p>
+            </div>
+            <div class="section-actions">
+              <span class="muted" id="books-summary"></span>
+              <button type="button" class="btn" id="refresh-books">刷新书架</button>
+            </div>
+          </div>
+
+          <p class="inline-status" id="books-status" role="status" aria-live="polite"></p>
+
+          <div class="banner banner-error" id="books-error" role="alert" hidden>
+            <span class="banner-text" id="books-error-text"></span>
+            <button type="button" class="btn btn-sm" id="books-retry">重试</button>
+          </div>
+
+          <div class="empty-state" id="books-loading">正在加载书架…</div>
+
+          <div class="empty-state" id="books-empty" hidden>
+            <span class="empty-mark" aria-hidden="true">书</span>
+            <h3>书架还是空的</h3>
+            <p>创建下载任务并完成后，书籍会出现在这里。目录项与已缓存项会分别统计。</p>
+            <button type="button" class="btn btn-primary" data-goto="add">添加下载</button>
+          </div>
+
+          <div class="table-wrap" id="books-table-wrap" hidden>
+            <table class="data-table books-table">
+              <caption class="sr-only">书架中的书籍，包含目录项、已缓存项、缺口、最近任务与操作。</caption>
+              <thead>
+                <tr>
+                  <th scope="col">书名</th>
+                  <th scope="col">站点</th>
+                  <th scope="col">目录项</th>
+                  <th scope="col">已缓存项</th>
+                  <th scope="col">缺口</th>
+                  <th scope="col">最近任务</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody id="books-body"></tbody>
+            </table>
+          </div>
+
+          <p class="table-legend"><strong>目录项</strong> 与<strong>已缓存项</strong> 统计站点目录条目，实际合并后的章节数在任务结果中显示。数量未知时显示“未知”，不按 0 处理。无缓存时无法补齐或合并，请先下载。</p>
+        </section>
+
+        <!-- 添加下载 -->
+        <section class="view" id="view-add" aria-labelledby="add-heading" hidden>
+          <div class="section-head">
+            <div class="section-copy">
+              <h2 id="add-heading">添加下载</h2>
+              <p class="section-note">搜索站点目录，或直接粘贴书籍链接。任务会进入任务中心，可随时查看进度。</p>
+            </div>
+          </div>
+
+          <fieldset class="card access-card">
+            <legend>访问方式</legend>
+            <div class="mode-options">
+              <label class="mode-option">
+                <input type="radio" name="access-mode" value="auto" checked>
+                <span class="mode-copy">
+                  <strong>自动</strong>
+                  <small>优先使用普通访问；遇到整域拦截时按现有策略处理。</small>
+                </span>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="access-mode" value="browser">
+                <span class="mode-copy">
+                  <strong>通过浏览器（复用验证会话）</strong>
+                  <small>复用已通过验证的浏览器会话，适合站点拦截自动访问时。</small>
+                </span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div class="grid-two">
+            <article class="card">
+              <h3 class="card-title">搜索书籍</h3>
+              <p class="card-note">输入书名关键词，选择搜索结果后加入下载队列。</p>
+              <form id="search-form" class="stack" novalidate>
+                <div class="field">
+                  <label for="search-query">关键词</label>
+                  <input type="search" id="search-query" name="query" placeholder="书名关键词" autocomplete="off" enterkeyhint="search">
+                </div>
+                <div class="form-actions">
+                  <button type="submit" class="btn btn-primary" id="search-submit">搜索</button>
+                </div>
+              </form>
+              <p class="inline-status" id="search-status" role="status" aria-live="polite"></p>
+
+              <div class="search-panel" id="search-panel" hidden>
+                <div class="search-panel-head" id="search-panel-head"></div>
+                <ul class="result-list" id="search-results"></ul>
+              </div>
+            </article>
+
+            <article class="card">
+              <h3 class="card-title">通过链接下载</h3>
+              <p class="card-note">粘贴目录页或任意章节页地址，创建下载任务。</p>
+              <form id="url-form" class="stack">
+                <div class="field">
+                  <label for="download-url">目录或章节页链接</label>
+                  <input type="url" id="download-url" name="url" placeholder="https://…" autocomplete="off" spellcheck="false" required>
+                </div>
+                <div class="form-actions">
+                  <button type="submit" class="btn btn-primary" id="download-submit">开始下载</button>
+                </div>
+              </form>
+              <p class="hint">只抓取站点公开可访问的章节，不包含登录、付费或验证码绕过。</p>
+            </article>
+          </div>
+
+          <p class="page-note">TXT 保存在本机输出目录，章节缓存保留在项目 cache 目录；可在设置中修改 TXT 输出位置。</p>
+        </section>
+
+        <!-- 任务中心 -->
+        <section class="view" id="view-tasks" aria-labelledby="tasks-heading" hidden>
+          <div class="section-head">
+            <div class="section-copy">
+              <h2 id="tasks-heading" tabindex="-1">任务中心</h2>
+              <p class="section-note">每秒自动刷新。可查看进度、缺章、告警、错误、搜索结果与技术详情。</p>
+            </div>
+            <div class="section-actions">
+              <span class="auto-refresh"><span class="dot" aria-hidden="true"></span>自动刷新</span>
+            </div>
+          </div>
+
+          <div class="banner banner-error" id="tasks-error" role="alert" hidden>
+            <span class="banner-text" id="tasks-error-text"></span>
+            <button type="button" class="btn btn-sm" id="tasks-retry">重试</button>
+          </div>
+
+          <div class="empty-state" id="tasks-loading">正在加载任务…</div>
+
+          <div class="empty-state" id="tasks-empty" hidden>
+            <span class="empty-mark" aria-hidden="true">任</span>
+            <h3>还没有任务</h3>
+            <p>创建搜索或下载任务后，进度与结果会显示在这里。</p>
+            <button type="button" class="btn btn-primary" data-goto="add">添加下载</button>
+          </div>
+
+          <div class="table-wrap" id="tasks-table-wrap" hidden>
+            <table class="data-table tasks-table">
+              <caption class="sr-only">任务列表，按创建时间从新到旧排列。</caption>
+              <thead>
+                <tr>
+                  <th scope="col">类型</th>
+                  <th scope="col">任务</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">进度</th>
+                  <th scope="col">更新时间</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody id="tasks-body"></tbody>
+            </table>
+          </div>
+
+          <article class="card task-detail" id="task-detail" aria-labelledby="task-detail-title" hidden></article>
+        </section>
+
+        <!-- 设置 -->
+        <section class="view" id="view-settings" aria-labelledby="settings-heading" hidden>
+          <div class="section-head">
+            <div class="section-copy">
+              <h2 id="settings-heading">设置</h2>
+              <p class="section-note">修改输出目录、等待时间与浏览器路径。默认值沿用现有 CLI 配置。</p>
+            </div>
+            <div class="section-actions">
+              <button type="button" class="btn" id="settings-reload">重新载入</button>
+            </div>
+          </div>
+
+          <p class="inline-status" id="settings-status" role="status" aria-live="polite"></p>
+
+          <div class="banner banner-error" id="settings-error" role="alert" hidden>
+            <span class="banner-text" id="settings-error-text"></span>
+          </div>
+
+          <form class="card settings-form" id="settings-form" novalidate>
+            <div class="settings-section">
+              <h3 class="card-title">输出</h3>
+              <div class="field">
+                <label for="set-output-dir">输出目录</label>
+                <input type="text" id="set-output-dir" name="output_dir" placeholder="/home/用户名/books" autocomplete="off" spellcheck="false" required>
+                <p class="hint">WSL 路径，例如 <code>/home/jason/books</code>。合并 TXT 写入此目录，章节缓存继续保留在项目 cache 目录。</p>
+              </div>
+            </div>
+
+            <details class="advanced" id="advanced-settings">
+              <summary>高级设置</summary>
+              <p class="hint">保存后用于之后创建的任务，不会修改正在运行的任务。浏览器路径可留空以自动检测。</p>
+              <div class="field-grid">
+                <div class="field">
+                  <label for="set-delay">请求间隔（秒）</label>
+                  <input type="number" id="set-delay" name="delay" min="0" step="0.1" inputmode="decimal">
+                </div>
+                <div class="field">
+                  <label for="set-timeout">请求超时（秒）</label>
+                  <input type="number" id="set-timeout" name="timeout" min="1" step="1" inputmode="numeric">
+                </div>
+                <div class="field">
+                  <label for="set-retries">单章请求重试次数</label>
+                  <input type="number" id="set-retries" name="retries" min="1" step="1" inputmode="numeric">
+                </div>
+                <div class="field">
+                  <label for="set-retry-rounds">重试轮次</label>
+                  <input type="number" id="set-retry-rounds" name="retry_rounds" min="0" step="1" inputmode="numeric">
+                </div>
+                <div class="field">
+                  <label for="set-retry-delay">重试间隔（秒）</label>
+                  <input type="number" id="set-retry-delay" name="retry_delay" min="0" step="0.1" inputmode="decimal">
+                </div>
+                <div class="field">
+                  <label for="set-verification-timeout">人工验证等待（秒）</label>
+                  <input type="number" id="set-verification-timeout" name="verification_timeout" min="1" step="1" inputmode="numeric">
+                </div>
+                <div class="field field-wide">
+                  <label for="set-browser-mode">网页访问方式</label>
+                  <select id="set-browser-mode" name="browser_mode">
+                    <option value="extension">当前浏览器的新标签页（需安装扩展）</option>
+                    <option value="separate">独立 WSL 验证浏览器（兼容方式）</option>
+                  </select>
+                </div>
+                <div class="field field-wide">
+                  <label for="set-browser-executable">浏览器可执行文件路径</label>
+                  <input type="text" id="set-browser-executable" name="browser_executable" placeholder="留空自动检测" autocomplete="off" spellcheck="false">
+                </div>
+              </div>
+            </details>
+
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary" id="settings-save">保存设置</button>
+              <span class="hint">正在运行的任务不受影响。</span>
+            </div>
+          </form>
+        </section>
+      </main>
+
+      <footer class="page-foot">本地工具 · 仅抓取公共章节 · 缓存与输出保存在本机</footer>
+    </div>
+  </div>
+
+  <div class="toasts" id="toast-region" aria-live="polite" aria-atomic="false"></div>
+
+  <dialog id="remove-book-dialog" aria-labelledby="remove-book-title" aria-describedby="remove-book-description">
+    <h2 id="remove-book-title">删除书籍</h2>
+    <p id="remove-book-name"></p>
+    <p id="remove-book-description">默认只从书架移除，保留缓存、TXT 和任务历史。以后重新添加同一链接即可恢复。</p>
+    <p id="remove-book-pending" class="muted" hidden>上次永久删除未完成。请继续清理；完成前该书不能重新下载。</p>
+    <label class="remove-book-option"><input type="checkbox" id="remove-book-files"> 同时永久删除该书的本地缓存和 TXT / 来源文件</label>
+    <p class="hint">勾选后无法撤销，缓存中的旧版本也会清理。未能识别归属的文件会保留。</p>
+    <details><summary>查看识别到的清理范围</summary><pre id="remove-book-paths"></pre></details>
+    <p id="remove-book-error" role="alert"></p>
+    <div class="form-actions">
+      <button type="button" class="btn" id="remove-book-cancel">取消</button>
+      <button type="button" class="btn btn-danger" id="remove-book-confirm">确认移除</button>
+    </div>
+  </dialog>
+
+  <div class="shutdown-screen" id="shutdown-screen" hidden>
+    <div class="shutdown-card" role="alertdialog" aria-modal="true" aria-labelledby="shutdown-title" aria-describedby="shutdown-message">
+      <h2 id="shutdown-title">后台已退出</h2>
+      <p id="shutdown-message">任务轮询已停止，缓存与已生成的文件已保留。</p>
+      <button type="button" class="btn btn-primary" id="shutdown-reload">重新加载页面</button>
+    </div>
+  </div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

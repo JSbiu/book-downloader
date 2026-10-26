@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "书页 · 焕新交互原型",
+  "version": "0.1.0",
+  "description": "书页 Chrome 插件的交互原型。示例数据、模拟下载，可导出示例 TXT，无需本地后台。",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "launcher.js"
+  },
+  "action": {
+    "default_title": "打开书页 · 焕新交互原型"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none';"
+  }
+}

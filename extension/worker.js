@@ -656,18 +656,54 @@ async function route(message) {
     if (previousResult?.broadened) {
       const result = { ...previousResult, candidates: previousResult.candidates.filter(candidate => !isBlocked(candidate)),
         preferredId: null, calls: 0, reused: true, bookId: context?.id || null };
-      await chrome.storage.session.set({ lastSearch: result });
+      if (message.diagnostics === true) {
+        result.diagnostics = {
+          rounds: [],
+          merge: { input: previousResult.candidates.length, unique: previousResult.candidates.length,
+            duplicates_removed: 0 },
+          identity_conflicts: {
+            note: 'included_in_final_candidates',
+            count: previousResult.candidates.filter(candidate => candidate.identityConflict).length
+          },
+          blocked: {
+            input: previousResult.candidates.length,
+            removed: previousResult.candidates.length - result.candidates.length,
+            remaining: result.candidates.length
+          },
+          cached_candidates: previousResult.candidates.length,
+          final_candidates: result.candidates.length,
+          broadened: true,
+          cache_use: 'previous_broad',
+          calls: 0
+        };
+      }
+      const stored = message.diagnostics === true
+        ? (() => { const { diagnostics, ...value } = result; return value; })() : result;
+      await chrome.storage.session.set({ lastSearch: stored });
       return result;
     }
     const { deepseekApiKey } = await chrome.storage.local.get('deepseekApiKey');
     if (!deepseekApiKey) throw new Error('key_missing');
     const controller = new AbortController();
     searching = controller;
+    let diagnostics = null;
     const result = { ...await searchBooks(query, { apiKey: deepseekApiKey, fetchImpl: fetch, signal: controller.signal,
-      includeOtherSources, isBlocked, previousResult }), sessionId: crypto.randomUUID(), bookId: context?.id || null };
+      includeOtherSources, isBlocked, previousResult, ...(message.diagnostics === true ? {
+        onDiagnostics: value => { diagnostics = value; }
+      } : {}) }), sessionId: crypto.randomUUID(), bookId: context?.id || null };
     if (includeOtherSources) result.preferredId = null;
+    if (message.diagnostics === true) {
+      result.diagnostics = {
+        scope: context ? 'book' : 'global',
+        include_other_sources: includeOtherSources,
+        ...diagnostics,
+        calls: result.calls
+      };
+    }
     if (searching !== controller || controller.signal.aborted) throw new Error('aborted');
-    await chrome.storage.session.set({ lastSearch: result, searchView: null });
+    const stored = message.diagnostics === true
+      ? (() => { const { diagnostics, ...value } = result; return value; })() : result;
+    await chrome.storage.session.set({ lastSearch: stored, searchView: null });
     return result;
   }
   if (message.type === 'ADD_BOOK') return { id: await addBook(message.candidate) };

@@ -199,6 +199,32 @@ test('same title candidates remain one contiguous group without changing source 
   assert.equal(titles.lastIndexOf('分组示例小说'), 2);
 });
 
+test('same-title candidates sort by explicit author while unknown authors stay last', async () => {
+  const results = [
+    { title: '作者排序示例小说', url: 'https://www.wxdy.cc/books/501/', author: '作者乙', snippet: '章节目录' },
+    { title: '作者排序示例小说', url: 'https://www.23txxt.com/bqg/502/', author: '作者甲', snippet: '章节目录' },
+    { title: '作者排序示例小说', url: 'https://www.trxs.cc/tongren/503.html' }
+  ];
+  const { fetchImpl } = stubFetch([response({ results: [] }), response({ results })]);
+  const result = await searchBooks('作者排序示例小说', { apiKey: token, fetchImpl });
+  assert.deepEqual(result.candidates.map(candidate => candidate.author), ['作者甲', '作者乙', null]);
+});
+
+test('same-author candidates preserve declared source and entry priority', async () => {
+  const results = [
+    { title: '同作者排序示例小说', url: 'https://www.23txxt.com/bqg/602/101.html', author: '作者甲', snippet: '章节目录' },
+    { title: '同作者排序示例小说', url: 'https://www.wxdy.cc/books/603/101.html', author: '作者甲', snippet: '章节目录' },
+    { title: '同作者排序示例小说', url: 'https://www.23txxt.com/bqg/604/', author: '作者甲', snippet: '章节目录' }
+  ];
+  const { fetchImpl } = stubFetch([response({ results: [] }), response({ results })]);
+  const result = await searchBooks('同作者排序示例小说', { apiKey: token, fetchImpl });
+  assert.deepEqual(result.candidates.map(candidate => [candidate.sourceId, candidate.exact]), [
+    ['txxt', true],
+    ['wxdy', true],
+    ['txxt', true]
+  ]);
+});
+
 test('an exact title without metadata stays visible but is marked unverified and not preselected', async () => {
   const results = [{
     title: '待确认示例小说',
@@ -383,6 +409,120 @@ test('zero results remain a successful empty list', async () => {
   assert.equal(result.broadened, true);
   assert.deepEqual(result.candidates, []);
   assert.equal(result.preferredId, null);
+});
+
+test('diagnostics count fixed exclusion reasons without changing filtering', async () => {
+  const raw = [
+    { title: '诊断示例小说', url: 'not-a-url', snippet: '作者：诊断甲。章节目录。' },
+    { title: '诊断示例小说', url: 'https://qidian.com/book/1', snippet: '作者：诊断甲。章节目录。' },
+    { title: '诊断示例小说', url: 'https://bbs.example.test/thread/2', snippet: '作者：诊断甲。章节目录。' },
+    { title: '另一个标题', url: 'https://reader.example.test/book/3', snippet: '作者：诊断甲。章节目录。' },
+    { title: '诊断示例小说', url: 'https://reader.example.test/read/4', snippet: '作者：诊断甲。资源下载。' },
+    { title: '诊断示例小说', url: 'https://reader.example.test/book/5', snippet: '作者：诊断甲。章节目录。' }
+  ];
+  const summaries = [];
+  const { fetchImpl } = stubFetch([response({ results: [] }), response({ results: raw })]);
+  const result = await searchBooks('诊断示例小说', {
+    apiKey: token,
+    fetchImpl,
+    onDiagnostics: value => summaries.push(value)
+  });
+  assert.equal(result.candidates.length, 2);
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].rounds.length, 2);
+  assert.deepEqual(summaries[0].rounds.map(value => value.phase), ['targeted', 'broad']);
+  assert.deepEqual(summaries[0].rounds[1], {
+    phase: 'broad',
+    raw: 6,
+    filtered: 2,
+    unique: 2,
+    duplicates_removed: 0,
+    exclusions: {
+      invalid_url: 1,
+      platform_domain: 1,
+      empty_title: 0,
+      forum_or_promotion: 1,
+      unregistered_source: 0,
+      title_mismatch: 1,
+      evidence_insufficient: 0
+    }
+  });
+  assert.deepEqual(summaries[0].totals.exclusions, {
+    invalid_url: 1,
+    platform_domain: 1,
+    empty_title: 0,
+    forum_or_promotion: 1,
+    unregistered_source: 0,
+    title_mismatch: 1,
+    evidence_insufficient: 0
+  });
+  assert.equal(summaries[0].cache_use, 'fresh_broad');
+});
+
+test('diagnostics separate merge, blocked attachment and reused cache stages', async () => {
+  const previous = {
+    query: '诊断复用示例小说',
+    candidates: [{
+      id: 'https://www.23txxt.com/bqg/1101/',
+      url: 'https://www.23txxt.com/bqg/1101/',
+      title: '诊断复用示例小说',
+      author: '作者甲',
+      sourceId: 'txxt',
+      registeredSourceId: 'txxt',
+      registeredSourceName: '23txxt',
+      supported: true,
+      snippet: '章节目录',
+      exact: true
+    }],
+    preferredId: null,
+    calls: 1,
+    broadened: false
+  };
+  const summaries = [];
+  const { fetchImpl } = stubFetch([response({ results: [
+    { title: '诊断复用示例小说', url: 'https://www.wxdy.cc/books/1103/', snippet: '章节目录' },
+    { title: '诊断复用示例小说', url: 'https://www.wxdy.cc/books/1103/?utm_source=diagnostic', snippet: '章节目录' }
+  ] })]);
+  const result = await searchBooks('诊断复用示例小说', {
+    apiKey: token,
+    fetchImpl,
+    includeOtherSources: true,
+    previousResult: previous,
+    isBlocked: candidate => candidate.sourceId === 'txxt',
+    onDiagnostics: value => summaries.push(value)
+  });
+  assert.equal(result.reused, true);
+  assert.equal(result.calls, 1);
+  assert.equal(summaries.length, 1);
+  assert.deepEqual(summaries[0].rounds.map(value => value.phase), ['broad']);
+  assert.deepEqual(summaries[0].merge, { input: 2, unique: 2, duplicates_removed: 0 });
+  assert.deepEqual(summaries[0].identity_conflicts, {
+    note: 'included_in_final_candidates',
+    count: 0
+  });
+  assert.deepEqual(summaries[0].blocked, { input: 2, removed: 1, remaining: 1 });
+  assert.equal(summaries[0].cached_candidates, 1);
+  assert.equal(summaries[0].final_candidates, 1);
+  assert.equal(summaries[0].cache_use, 'previous_targeted');
+});
+
+test('diagnostics do not change the normal search result', async () => {
+  const raw = [
+    { title: '等价诊断示例小说', url: 'https://www.wxdy.cc/books/1201/', author: '作者乙', snippet: '章节目录' },
+    { title: '等价诊断示例小说', url: 'https://www.23txxt.com/bqg/1202/', author: '作者甲', snippet: '章节目录' },
+    { title: '等价诊断示例小说', url: 'https://reader.example.test/book/1203', snippet: '章节目录' }
+  ];
+  const calls = values => stubFetch([response({ results: [] }), response({ results: values })]);
+  const withoutDiagnostics = await searchBooks('等价诊断示例小说', {
+    apiKey: token,
+    fetchImpl: calls(raw).fetchImpl
+  });
+  const withDiagnostics = await searchBooks('等价诊断示例小说', {
+    apiKey: token,
+    fetchImpl: calls(raw).fetchImpl,
+    onDiagnostics: () => {}
+  });
+  assert.deepEqual(withDiagnostics, withoutDiagnostics);
 });
 
 test('empty input returns no candidates without a request', async () => {
@@ -762,9 +902,8 @@ test('registered sources are ranked ahead of unknown sites while only 23txxt rem
   ];
   const { fetchImpl } = stubFetch([response({ results: raw }), response({ results: [] })]);
   const result = await searchBooks('来源优先小说', { apiKey: token, fetchImpl });
-  assert.deepEqual(result.candidates.map(candidate => candidate.registeredSourceId).filter(Boolean), [
-    'txxt', 'trxs', 'bixiange', 'shuba'
-  ]);
+  assert.ok(result.candidates.filter(candidate => !candidate.registeredSourceId)
+    .every(candidate => !candidate.supported));
   assert.deepEqual(result.candidates.filter(candidate => candidate.supported)
     .map(candidate => candidate.registeredSourceId), ['txxt']);
   assert.ok(['trxs.cc', '笔仙阁', '69shuba'].every(name =>

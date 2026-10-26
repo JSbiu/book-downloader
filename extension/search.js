@@ -46,6 +46,16 @@ const CHAPTER_HEADING = /(?:第\s*[0-9零〇一二三四五六七八九十百千
 const AUTHOR_FIELD = /作者\s*[:：]\s*([^|｜,，。;；\s]{1,40})/u;
 const candidateEntryRank = new WeakMap();
 const candidateRegisteredKey = new WeakMap();
+const EXCLUSION_REASONS = [
+  'invalid_url',
+  'platform_domain',
+  'empty_title',
+  'forum_or_promotion',
+  'unregistered_source',
+  'title_mismatch',
+  'evidence_insufficient'
+];
+const emptyExclusions = () => Object.fromEntries(EXCLUSION_REASONS.map(reason => [reason, 0]));
 
 export class SearchError extends Error {
   constructor(code, message = code) {
@@ -138,11 +148,32 @@ function resultAuthor(result, evidence = evidenceText(result)) {
   return labeled ? normalizeText(labeled[1]) : null;
 }
 
-function candidateFrom(result) {
+function newRound(phase) {
+  return {
+    phase,
+    raw: 0,
+    filtered: 0,
+    unique: 0,
+    duplicates_removed: 0,
+    exclusions: emptyExclusions()
+  };
+}
+
+function candidateFrom(result, reject = () => {}) {
   const rawUrl = normalizedUrl(result.url);
-  if (!rawUrl || isExcludedHost(rawUrl)) return null;
+  if (!rawUrl) {
+    reject('invalid_url');
+    return null;
+  }
+  if (isExcludedHost(rawUrl)) {
+    reject('platform_domain');
+    return null;
+  }
   const title = cleanBookTitle(result.title);
-  if (!title) return null;
+  if (!title) {
+    reject('empty_title');
+    return null;
+  }
   const source = sourceForUrl(rawUrl);
   const registered = registeredSourceForUrl(rawUrl);
   const sourceUrl = source ? canonicalBookUrl(rawUrl) : null;
@@ -220,17 +251,31 @@ function metadataEvidence(candidate) {
   };
 }
 
-function isBookCandidate(candidate, normalizedQuery, { allowUnverifiedExact = false } = {}) {
-  if (isForumOrNonBookPage(candidate)) return false;
-  if (!normalizedQuery) return false;
+function isBookCandidate(candidate, normalizedQuery, {
+  allowUnverifiedExact = false,
+  reject = () => {}
+} = {}) {
+  if (isForumOrNonBookPage(candidate)) {
+    reject('forum_or_promotion');
+    return false;
+  }
+  if (!normalizedQuery) {
+    reject('title_mismatch');
+    return false;
+  }
 
   if (candidate.registeredSourceId) {
-    return titleMatches(candidate, normalizedQuery) || authorMatches(candidate, normalizedQuery);
+    if (titleMatches(candidate, normalizedQuery) || authorMatches(candidate, normalizedQuery)) return true;
+    reject('title_mismatch');
+    return false;
   }
 
   const titleMatch = titleMatches(candidate, normalizedQuery);
   const authorMatch = authorMatches(candidate, normalizedQuery);
-  if (!titleMatch && !authorMatch) return false;
+  if (!titleMatch && !authorMatch) {
+    reject('title_mismatch');
+    return false;
+  }
 
   const evidence = metadataEvidence(candidate);
   if (!evidence.strongMetadata) {
@@ -238,23 +283,28 @@ function isBookCandidate(candidate, normalizedQuery, { allowUnverifiedExact = fa
       candidate.identityUnverified = true;
       return true;
     }
-    return allowUnverifiedExact && titleMatch && Boolean(candidate.registeredSourceId);
+    reject('evidence_insufficient');
+    return false;
   }
   return true;
 }
 
-function targetedCandidate(result, title) {
-  const candidate = candidateFrom(result);
-  if (!candidate?.registeredSourceId) return null;
+function targetedCandidate(result, title, reject) {
+  const candidate = candidateFrom(result, reject);
+  if (!candidate) return null;
+  if (!candidate.registeredSourceId) {
+    reject('unregistered_source');
+    return null;
+  }
   candidate.exact = workTitle(candidate.title) === title;
-  return isBookCandidate(candidate, title) ? candidate : null;
+  return isBookCandidate(candidate, title, { reject }) ? candidate : null;
 }
 
-function localCandidate(result, title) {
-  const candidate = candidateFrom(result);
+function localCandidate(result, title, reject) {
+  const candidate = candidateFrom(result, reject);
   if (!candidate) return null;
   candidate.exact = workTitle(candidate.title) === title;
-  return isBookCandidate(candidate, title, { allowUnverifiedExact: true }) ? candidate : null;
+  return isBookCandidate(candidate, title, { allowUnverifiedExact: true, reject }) ? candidate : null;
 }
 
 function candidateKey(candidate) {
@@ -297,9 +347,13 @@ function deduplicate(candidates) {
   return [...byKey.values()];
 }
 
-function candidatesFrom(results, title, targeted) {
+function candidatesFrom(results, title, targeted, round) {
   const candidates = [];
   const authorsByBook = new Map();
+  round.raw = results.length;
+  const reject = reason => {
+    round.exclusions[reason] += 1;
+  };
   for (const result of results) {
     const bookId = canonicalBookUrl(result.url);
     const author = resultAuthor(result);
@@ -307,10 +361,15 @@ function candidatesFrom(results, title, targeted) {
       if (!authorsByBook.has(bookId)) authorsByBook.set(bookId, new Set());
       authorsByBook.get(bookId).add(author);
     }
-    const candidate = targeted ? targetedCandidate(result, title) : localCandidate(result, title);
+    const candidate = targeted
+      ? targetedCandidate(result, title, reject)
+      : localCandidate(result, title, reject);
     if (candidate) candidates.push(candidate);
   }
+  round.filtered = candidates.length;
   const consolidated = deduplicate(candidates);
+  round.unique = consolidated.length;
+  round.duplicates_removed = candidates.length - consolidated.length;
   for (const candidate of consolidated) {
     if (candidate.supported && authorsByBook.get(candidate.id)?.size > 1) {
       candidate.identityConflict = true;
@@ -381,7 +440,18 @@ function groupByTitle(candidates) {
     if (!byTitle.has(key)) byTitle.set(key, []);
     byTitle.get(key).push(candidate);
   }
-  return [...byTitle.values()].flat();
+  return [...byTitle.values()].flatMap(group => group
+    .map((candidate, index) => ({ candidate, index }))
+    .sort((left, right) => {
+      const leftAuthor = normalizeText(left.candidate.author).normalize('NFKC').toLocaleLowerCase();
+      const rightAuthor = normalizeText(right.candidate.author).normalize('NFKC').toLocaleLowerCase();
+      if (!leftAuthor || !rightAuthor) return (leftAuthor ? 0 : 1) - (rightAuthor ? 0 : 1);
+      return leftAuthor.localeCompare(rightAuthor, 'zh-CN')
+        || categoryRank(left.candidate) - categoryRank(right.candidate)
+        || entryRank(left.candidate) - entryRank(right.candidate)
+        || left.index - right.index;
+    })
+    .map(item => item.candidate));
 }
 
 function cleanQuery(value) {
@@ -523,6 +593,56 @@ async function filterBlocked(candidates, isBlocked, blockedCandidates) {
   return visible;
 }
 
+function buildDiagnostics({
+  rounds,
+  mergeInput,
+  merged,
+  visible,
+  blockedCandidates,
+  cachedCandidates = 0,
+  cacheUse = 'none',
+  broadened
+}) {
+  return {
+    rounds,
+    totals: {
+      raw: rounds.reduce((sum, round) => sum + round.raw, 0),
+      filtered: rounds.reduce((sum, round) => sum + round.filtered, 0),
+      exclusions: Object.fromEntries(EXCLUSION_REASONS.map(reason =>
+        [reason, rounds.reduce((sum, round) => sum + round.exclusions[reason], 0)]))
+    },
+    merge: {
+      input: mergeInput,
+      unique: merged.length,
+      duplicates_removed: mergeInput - merged.length
+    },
+    identity_conflicts: {
+      note: 'included_in_final_candidates',
+      count: merged.filter(candidate => candidate.identityConflict).length
+    },
+    blocked: {
+      input: merged.length,
+      removed: blockedCandidates.length,
+      remaining: visible.length
+    },
+    cached_candidates: cachedCandidates,
+    final_candidates: visible.length,
+    broadened,
+    cache_use: cacheUse
+  };
+}
+
+function diagnosticsForEmpty() {
+  return buildDiagnostics({
+    rounds: [],
+    mergeInput: 0,
+    merged: [],
+    visible: [],
+    blockedCandidates: [],
+    broadened: false
+  });
+}
+
 function result(value, candidates, calls, broadened, blockedCandidates = [], reused = false) {
   const consolidated = deduplicate(candidates);
   const preferred = preferredCandidate(consolidated, blockedCandidates);
@@ -543,18 +663,21 @@ export async function searchBooks(query, {
   signal,
   includeOtherSources = false,
   isBlocked,
-  previousResult
+  previousResult,
+  onDiagnostics
 } = {}) {
   if (typeof fetchImpl !== 'function') throw searchError('fetch_impl_missing');
   const value = cleanQuery(query);
   if ([...value].length > MAX_QUERY_LENGTH) throw searchError('query_too_long');
   if (signal?.aborted) throw searchError('aborted');
   if (!value) {
+    onDiagnostics?.(diagnosticsForEmpty());
     return { query: value, candidates: [], preferredId: null, calls: 0, broadened: false };
   }
 
   const title = queryTitle(value);
   if (!title) {
+    onDiagnostics?.(diagnosticsForEmpty());
     return { query: value, candidates: [], preferredId: null, calls: 0, broadened: false };
   }
   const broad = broadQuery(title);
@@ -564,6 +687,10 @@ export async function searchBooks(query, {
   let calls = 0;
   let candidates = [];
   const blockedCandidates = [];
+  const rounds = [];
+  const notify = round => {
+    rounds.push(round);
+  };
   const reused = includeOtherSources && previousResult?.query === value && previousResult.broadened === false
     && Array.isArray(previousResult.candidates);
   try {
@@ -573,27 +700,45 @@ export async function searchBooks(query, {
       const targeted = targetedQuery(title);
       if (targeted) {
         calls += 1;
+        const round = newRound('targeted');
         const targetedCandidates = candidatesFrom(
           await request(apiKey, targeted, question, fetchImpl, signal),
           title,
-          true
+          true,
+          round
         );
         if (!includeOtherSources) {
           const visible = await filterBlocked(targetedCandidates, isBlocked, blockedCandidates);
           if (preferredCandidate(visible, blockedCandidates)) {
+            round.blocked = blockedCandidates.length;
+            notify(round);
+            onDiagnostics?.(buildDiagnostics({
+              rounds,
+              mergeInput: targetedCandidates.length,
+              merged: targetedCandidates,
+              visible,
+              blockedCandidates,
+              broadened: false,
+              cacheUse: 'fresh_targeted'
+            }));
             return result(value, visible, calls, false, blockedCandidates);
           }
         }
+        round.blocked = blockedCandidates.length;
+        notify(round);
         candidates.push(...targetedCandidates);
       }
     }
 
     calls += 1;
+    const round = newRound('broad');
     candidates.push(...candidatesFrom(
       await request(apiKey, broad, question, fetchImpl, signal),
       title,
-      false
+      false,
+      round
     ));
+    notify(round);
   } catch (error) {
     if (error instanceof SearchError) throw error;
     if (signal?.aborted) throw searchError('aborted');
@@ -602,5 +747,15 @@ export async function searchBooks(query, {
 
   const consolidated = deduplicate(candidates);
   const filtered = await filterBlocked(consolidated, isBlocked, blockedCandidates);
+  onDiagnostics?.(buildDiagnostics({
+    rounds,
+    mergeInput: candidates.length,
+    merged: consolidated,
+    visible: filtered,
+    blockedCandidates,
+    cachedCandidates: reused ? previousResult.candidates.length : 0,
+    broadened: true,
+    cacheUse: reused ? 'previous_targeted' : 'fresh_broad'
+  }));
   return result(value, filtered, calls, true, blockedCandidates, reused);
 }

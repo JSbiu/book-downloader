@@ -132,13 +132,13 @@ def main() -> int:
                         report(status='credential_boundary_failed')
                         return 1
                     report(phase='settings', status='saved_and_input_cleared', key_exposed=False)
-                    result = command(page, 'SEARCH', query=args.query)
+                    result = command(page, 'SEARCH', query=args.query, diagnostics=True)
                     if not result.get('ok'):
                         report(phase='search', status='failed', code=result.get('code'))
                         return 1
                     value = result['value']
                     report(phase='search', status='success', candidates=len(value['candidates']), calls=value['calls'],
-                           candidate_reasons=value.get('diagnostics'))
+                           diagnostics=value.get('diagnostics'))
                     if not 0 <= len(value['candidates']) <= 100 or value['calls'] > 2:
                         report(status='search_contract_failed')
                         return 1
@@ -156,7 +156,8 @@ def main() -> int:
                             if not command(page, 'BLOCK_SOURCE', id=book_id).get('ok'):
                                 report(status='book_source_block_failed')
                                 return 1
-                            alternative = command(page, 'SEARCH', bookId=book_id, includeOtherSources=True)
+                            alternative = command(page, 'SEARCH', bookId=book_id, includeOtherSources=True,
+                                                  diagnostics=True)
                             if not alternative.get('ok'):
                                 report(status='alternative_search_failed', code=alternative.get('code'))
                                 return 1
@@ -169,7 +170,8 @@ def main() -> int:
                                 report(status='blocked_source_returned')
                                 return 1
                             before_requests = len(search_requests)
-                            repeated = command(page, 'SEARCH', bookId=book_id, includeOtherSources=True)
+                            repeated = command(page, 'SEARCH', bookId=book_id, includeOtherSources=True,
+                                               diagnostics=True)
                             page.reload()
                             state = command(page, 'STATE')['value']
                             book = state['books'][0]
@@ -181,7 +183,9 @@ def main() -> int:
                                 return 1
                             report(phase='book_source_exclusion', status='verified',
                                    alternatives=len(alternatives['candidates']), extra_calls=alternatives['calls'],
-                                   reused_repeat_calls=0, refresh_preserved=True, whole_book_verified=False)
+                                   reused_repeat_calls=0, refresh_preserved=True, whole_book_verified=False,
+                                   alternative_diagnostics=alternatives.get('diagnostics'),
+                                   repeated_diagnostics=repeated['value'].get('diagnostics'))
                             return 0
                         page.reload()
                         page.locator('#search-summary').wait_for()
@@ -209,7 +213,7 @@ def main() -> int:
                         report(phase='source_discovery', status='api_no_supported_candidate')
                         return 2
                 elif args.source_url:
-                    result = command(page, 'SEARCH', query=args.source_url)
+                    result = command(page, 'SEARCH', query=args.source_url, diagnostics=True)
                     if not result.get('ok'):
                         report(phase='source_discovery', status='failed', code=result.get('code'))
                         return 1

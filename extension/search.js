@@ -150,7 +150,7 @@ function candidateFrom(result) {
   const candidate = {
     id: sourceUrl || rawUrl,
     url: source ? source.catalogUrl : rawUrl,
-    title,
+    title: workTitle(title),
     author: resultAuthor(result, evidence),
     sourceId: source ? source.id : null,
     registeredSourceId: registered?.id || null,
@@ -238,7 +238,7 @@ function isBookCandidate(candidate, normalizedQuery, { allowUnverifiedExact = fa
       candidate.identityUnverified = true;
       return true;
     }
-    return false;
+    return allowUnverifiedExact && titleMatch && Boolean(candidate.registeredSourceId);
   }
   return true;
 }

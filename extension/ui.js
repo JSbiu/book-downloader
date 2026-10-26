@@ -6,9 +6,17 @@ let signature = '', searching = false, searchVersion = 0, previewSignature = '';
 let searchShown = 10;
 let checkingUpdate = false;
 
+class CallError extends Error {
+  constructor(result) {
+    super(result?.message || '书页暂时没有响应，请重试。');
+    this.code = result?.code;
+    this.detail = result?.detail;
+  }
+}
+
 async function call(type, values = {}) {
   const result = await chrome.runtime.sendMessage({ type, ...values });
-  if (!result?.ok) throw new Error(result?.message || '书页暂时没有响应，请重试。');
+  if (!result?.ok) throw new CallError(result);
   return result.value;
 }
 
@@ -392,7 +400,13 @@ document.addEventListener('click', async event => {
       await refresh();
       if (action === 'EXPORT') toast('已请求导出，文件状态见下载详情。');
     }
-  } catch (error) { toast(error.message); }
+  } catch (error) {
+    const evidence = error.code === 'work_mismatch' && error.detail
+      ? `（当前：${error.detail.bookTitle || '未知'}／${error.detail.bookAuthor || '未知'}；`
+        + `候选：${error.detail.candidateTitle || '未知'}／${error.detail.candidateAuthor || '未知'}）`
+      : '';
+    toast(error.message + evidence);
+  }
   finally { target.disabled = false; if ($('book-dialog').open) renderDetail(); }
 });
 

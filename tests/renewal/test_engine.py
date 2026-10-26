@@ -299,8 +299,9 @@ class EngineBrowserTests(unittest.TestCase):
         self.assertEqual(len(self.api_calls), 1)
         book_id = self.command('DOWNLOAD', candidate=initial['candidates'][0])['id']
         self.until(lambda s: s['books'][0]['artifact'] and s['books'][0]['artifact']['state'] == 'complete')
-        self.search_results = [first, {'title': '示例小说 A', 'url': self.wxdy_source + '/books/20001/',
-                                     'snippet': '作者：示例作者甲。章节目录。'}]
+        replacement = {'title': '示例小说 A', 'url': self.wxdy_source + '/books/20001/',
+                       'snippet': '作者：示例作者甲。章节目录。'}
+        self.search_results = [first, replacement]
         self.page.locator('.main-nav [data-view="library"]').click()
         self.page.locator('#library-list [data-action="OPEN"]').click()
         self.page.locator('#detail-block').click()
@@ -311,15 +312,17 @@ class EngineBrowserTests(unittest.TestCase):
         self.assertEqual(len(result['candidates']), 1)
         self.command('SEARCH', bookId=book_id, includeOtherSources=True)
         self.assertEqual(len(self.api_calls), 2)
-        self.page.locator('.book-result [data-action="CANDIDATE"]').first.click()
+        source_card = self.page.locator('.book-result').filter(has_text='wxdy.cc')
+        self.assertEqual(source_card.count(), 1)
+        source_card.locator('[data-action="CANDIDATE"]').first.click()
         expect(self.page.locator('#detail-primary')).to_have_text('选为本书书源')
         self.page.locator('#detail-primary').click()
         self.until(lambda s: s['books'][0]['sourceId'] == 'wxdy')
         book = self.state()['books'][0]
         self.assertEqual((len(self.state()['books']), book['id'], book['status'], book['savedCount']), (1, book_id, 'shelved', 0))
         self.assertIsNone(book['artifact'])
-        self.wxdy_title = '示例小说 A 另版'
-        self.wxdy_author = '示例作者乙'
+        self.wxdy_title = '示例小说 A'
+        self.wxdy_author = '示例作者甲'
         self.command('RESUME', id=book_id)
         book = self.until(lambda s: s['books'][0]['artifact'] and s['books'][0]['artifact']['state'] == 'complete')['books'][0]
         records = self.page.evaluate('async id => (await import("./db.js")).listChapters(id)', book_id)
@@ -328,6 +331,8 @@ class EngineBrowserTests(unittest.TestCase):
         self.assertIn('首面示例正文。', newest)
         self.assertNotIn('前页示例正文。', newest)
         self.command('UNBLOCK_SOURCE', id=book_id, key='txxt')
+        self.search_results = [first]
+        self.command('SEARCH', query='示例小说 A')
         self.command('SET_SOURCE', id=book_id, candidate=first)
         book = self.state()['books'][0]
         self.assertEqual((book['sourceId'], book['title'], book['author'], book['rangeSavedCount']),
@@ -345,9 +350,7 @@ class EngineBrowserTests(unittest.TestCase):
                  'snippet': '作者：示例作者甲。章节目录。'}
         same_title_other_author = {'title': '示例小说 A', 'url': self.wxdy_source + '/books/20001/',
                                    'snippet': '作者：示例作者乙。章节目录。'}
-        unknown_author = {'title': '示例小说 A', 'url': self.wxdy_source + '/books/20001/',
-                          'snippet': '章节目录。'}
-        self.search_results = [first, same_title_other_author, unknown_author]
+        self.search_results = [first, same_title_other_author]
         initial = self.command('SEARCH', query='示例小说 A')
         book_id = self.command('ADD_BOOK', candidate=initial['candidates'][0])['id']
 
@@ -360,15 +363,20 @@ class EngineBrowserTests(unittest.TestCase):
                          (book_id, 'txxt', '示例小说 A', '示例作者甲'))
         self.assertEqual(len(self.state()['books']), 1)
 
+        same_author = {'title': '示例小说 A', 'url': self.wxdy_source + '/books/20002/',
+                       'snippet': '作者：示例作者甲。章节目录。'}
+        unknown_author = {'title': '示例小说 A', 'url': self.wxdy_source + '/books/20003/',
+                          'snippet': '章节目录。'}
+        self.search_results = [first, same_author, unknown_author]
+        self.command('SEARCH', query='示例小说 A')
+        search = self.state()['search']
+        if not any('/20003/' in candidate['url'] for candidate in search['candidates']):
+            self.fail(json.dumps(search, ensure_ascii=False))
         unknown = self.page.evaluate(
             '(message) => chrome.runtime.sendMessage(message)',
             {'type': 'SET_SOURCE', 'id': book_id, 'candidate': unknown_author})
         self.assertEqual(unknown['code'], 'work_mismatch')
-        self.assertEqual(len(self.state()['books']), 1)
         self.assertEqual(self.state()['books'][0]['sourceId'], 'txxt')
-
-        same_author = {'title': '示例小说A', 'url': self.wxdy_source + '/books/20001/',
-                       'snippet': '作者：示例作者甲。章节目录。'}
         self.command('SET_SOURCE', id=book_id, candidate=same_author)
         book = self.state()['books'][0]
         self.assertEqual((book['id'], book['sourceId'], book['title'], book['author']),

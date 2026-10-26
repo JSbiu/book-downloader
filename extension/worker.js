@@ -117,8 +117,18 @@ const busy = book => ['queued', 'downloading', 'needs_action'].includes(book.sta
 const titleKey = value => cleanBookTitle(value).replace(/\s+/g, '').toLocaleLowerCase();
 const authorKey = value => String(value || '').normalize('NFKC').replace(/\s+/g, '').toLocaleLowerCase();
 const PLACEHOLDER_TITLE = '待读取书籍';
+const errorCode = value => {
+  const code = value?.code || value?.message;
+  return typeof code === 'string' && Object.hasOwn(TEXT, code) ? code : 'operation_failed';
+};
 const sourceFields = ['sourceId', 'canonicalUrl', 'catalogUrl', 'catalog', 'snapshotId', 'chapterIndex', 'rangeTotal'];
 const sourceSnapshot = book => Object.fromEntries(sourceFields.map(key => [key, book[key]]));
+const identityEvidence = (book, candidate) => ({
+  bookTitle: cleanBookTitle(book?.title),
+  candidateTitle: cleanBookTitle(candidate?.title),
+  bookAuthor: String(book?.author || ''),
+  candidateAuthor: String(candidate?.author || '')
+});
 const identityRelation = (book, candidate) => {
   if (candidate?.identityConflict) return 'conflict';
   const bookTitle = titleKey(book?.title);
@@ -130,12 +140,22 @@ const identityRelation = (book, candidate) => {
   if (!bookAuthor || !candidateAuthor) return 'unknown';
   return bookAuthor === candidateAuthor ? 'same' : 'different';
 };
+const trustedCandidate = (value, candidates) => {
+  const canonical = canonicalBookUrl(value?.url);
+  if (!canonical) return null;
+  return (candidates || []).find(candidate => canonicalBookUrl(candidate.url) === canonical) || null;
+};
+const searchCandidate = async value => {
+  const { lastSearch } = await chrome.storage.session.get('lastSearch');
+  return trustedCandidate(value, lastSearch?.candidates);
+};
 const isSourceBlocked = (book, url) => (book.blockedSources || []).some(item => item.key === sourceKeyForUrl(url));
 const sameWork = (book, candidate) => canonicalBookUrl(candidate.url) === book.canonicalUrl
   || identityRelation(book, candidate) === 'same';
 const candidateBlocked = (books, candidate) => books.some(book => sameWork(book, candidate) && isSourceBlocked(book, candidate.url));
 
 async function addBook(candidate) {
+  candidate = await searchCandidate(candidate) || candidate;
   let url;
   try { url = new URL(candidate?.url); } catch { throw new Error('unsupported_source'); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('unsupported_source');
@@ -159,6 +179,8 @@ async function addBook(candidate) {
 }
 
 async function changeSource(id, candidate) {
+  candidate = await searchCandidate(candidate);
+  if (!candidate) throw new Error('work_mismatch');
   const found = await getBook(id);
   if (!found) throw new Error('book_missing');
   if (busy(found)) throw new Error('book_busy');
@@ -170,7 +192,11 @@ async function changeSource(id, candidate) {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('unsupported_source');
   const canonical = canonicalBookUrl(url.href) || url.href;
   const relation = found.canonicalUrl === canonical ? 'same' : identityRelation(found, candidate);
-  if (['different', 'conflict'].includes(relation)) throw new Error('work_mismatch');
+  if (relation !== 'same') {
+    const error = new Error('work_mismatch');
+    error.detail = identityEvidence(found, candidate);
+    throw error;
+  }
   const changed = await changeBook(id, book => {
     if (busy(book) || isSourceBlocked(book, candidate.url)) return null;
     if (book.canonicalUrl === canonical) return book;
@@ -341,6 +367,8 @@ async function readPage(book, tab) {
     await failBook(book.id, book.attempt, result.kind); return;
   }
   if (book.stage === 'catalog' && result.kind === 'catalog') {
+    // The directory URL only proves which source is being read; it does not
+    // prove that its metadata still names the selected work.
     const relation = identityRelation(book, result);
     if (['different', 'conflict'].includes(relation)) {
       await failBook(book.id, book.attempt, 'work_mismatch');
@@ -670,8 +698,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.target === 'offscreen' || sender.id !== chrome.runtime.id
       || !sender.url?.startsWith(chrome.runtime.getURL('index.html'))) return false;
   route(message).then(value => respond({ ok: true, value }), error => {
-    const code = error.code || error.message;
-    respond({ ok: false, code: TEXT[code] ? code : 'operation_failed', message: detail(code) });
+    const code = errorCode(error);
+    const response = { ok: false, code, message: detail(code) };
+    if (error?.detail) response.detail = error.detail;
+    respond(response);
   });
   return true;
 });

@@ -1,4 +1,5 @@
 const $ = id => document.getElementById(id);
+$('runtime-version').textContent = 'v' + chrome.runtime.getManifest().version;
 const labels = { queued: '排队中', downloading: '正在取得正文', needs_action: '需要本人确认',
   shelved: '已在书架', blocked: '本书已拉黑此书源', paused: '已暂停', partial: '部分未取得', ready: '样机范围已取得' };
 let state = { configured: false, books: [], search: null }, selected, view = 'search', filter = 'all';

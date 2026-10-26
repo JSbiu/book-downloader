@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 
 from ..models import Chapter, SiteSearchHit, SiteSearchRequest
 from .base import SiteAdapter
+from ..operation import warning
 from .common import absolute_url, clean_lines, extract_content
 
 
@@ -194,4 +195,9 @@ class BixiangeAdapter(SiteAdapter):
                 current_lines.append(line)
 
         flush()
+        if not assembled and all(
+            SECTION_HEADING.fullmatch(chapter.title) for chapter in chapters
+        ):
+            warning("自检提示：未识别到真实章节标题，已按阅读分段保留正文；真实章号和标题尚不确定。")
+            return tuple(chapters)
         return tuple(assembled)

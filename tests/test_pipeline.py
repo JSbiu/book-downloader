@@ -1,13 +1,16 @@
 import json
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from bs4 import BeautifulSoup
 
 from book_downloader.browser import same_target_document
 from book_downloader.cache import BookCache, cache_key
-from book_downloader.cli import format_number_ranges
+from book_downloader.cli import format_number_ranges, main, report_result
 from book_downloader.discovery import discover_book
 from book_downloader.errors import AccessBlockedError, DownloaderError
 from book_downloader.http import FetchedPage, looks_like_verification_page
@@ -152,6 +155,62 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("第二章 示例标题", assembled[0].content)
         self.assertIn("第二章续文。", assembled[1].content)
         self.assertNotIn("第2节", "\n".join(chapter.block for chapter in assembled))
+
+    def test_bixiange_preserves_sections_when_real_headings_are_missing(self):
+        adapter = BixiangeAdapter()
+        for numbers in ((1, 2), (3, 7)):
+            with self.subTest(numbers=numbers):
+                chapters = [
+                    Chapter(number, f"第{number}节", f"分段{number}正文完整保留。" * 8)
+                    for number in numbers
+                ]
+                warning = StringIO()
+                with redirect_stderr(warning):
+                    assembled = adapter.assemble_chapters(chapters, SAMPLE_BOOK_TITLE)
+
+                self.assertEqual(assembled, tuple(chapters))
+                self.assertIn("阅读分段", warning.getvalue())
+                self.assertIn("真实章号", warning.getvalue())
+                self.assertIn("不确定", warning.getvalue())
+
+    def test_bixiange_preserves_compact_unrecognized_headings_as_content(self):
+        chapters = [
+            Chapter(1, "第1节", "第一章示例开篇\n" + "首段正文完整保留。" * 8),
+            Chapter(2, "第2节", "第二章示例后续\n" + "次段正文完整保留。" * 8),
+        ]
+        warning = StringIO()
+        with redirect_stderr(warning):
+            assembled = BixiangeAdapter().assemble_chapters(chapters, SAMPLE_BOOK_TITLE)
+
+        self.assertEqual(assembled, tuple(chapters))
+        self.assertEqual([chapter.title for chapter in assembled], ["第1节", "第2节"])
+        self.assertIn("不确定", warning.getvalue())
+
+    def test_bixiange_section_titles_do_not_trigger_fallback_when_real_heading_exists(self):
+        first_body, next_body = "首段正文完整保留。" * 8, "续段正文完整保留。" * 8
+        chapters = [
+            Chapter(1, "第1节", f"第一章 示例开篇\n{first_body}"),
+            Chapter(2, "第2节", next_body),
+        ]
+        warning = StringIO()
+        with redirect_stderr(warning):
+            assembled = BixiangeAdapter().assemble_chapters(chapters, SAMPLE_BOOK_TITLE)
+
+        self.assertEqual(assembled, (Chapter(1, "第一章 示例开篇", f"{first_body}\n{next_body}"),))
+        self.assertEqual(warning.getvalue(), "")
+
+    def test_bixiange_named_first_chapter_keeps_continuations_together(self):
+        first_body, next_body = "首段正文完整保留。" * 8, "续段正文完整保留。" * 8
+        chapters = [
+            Chapter(1, "第一章 示例开篇", first_body),
+            Chapter(2, "第2节", next_body),
+        ]
+        warning = StringIO()
+        with redirect_stderr(warning):
+            assembled = BixiangeAdapter().assemble_chapters(chapters, SAMPLE_BOOK_TITLE)
+
+        self.assertEqual(assembled, (Chapter(1, "第一章 示例开篇", f"{first_body}\n{next_body}"),))
+        self.assertEqual(warning.getvalue(), "")
 
     def test_shuba_book_page_discovers_catalog(self):
         catalog_url = "https://www.69shuba.com/book/12345/"
@@ -323,6 +382,117 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("正文卷", cleaned.content)
         self.assertNotIn(f"{SAMPLE_BOOK_TITLE} 第1章", cleaned.content)
         self.assertIn("真正正文", cleaned.content)
+
+    def test_trxs_sanitizer_is_idempotent_with_intro_and_embedded_next_heading(self):
+        adapter = TrxsCcAdapter()
+        first_title, next_title = "第1章 示例开篇", "第2章 示例后续"
+        first_body, next_body = "首章正文完整保留。" * 8, "次章正文完整保留。" * 8
+        expected_content = f"{first_body}\n{next_title}\n{next_body}"
+        for title, headings in (
+            (f"{SAMPLE_BOOK_TITLE} 第1章", first_title),
+            (first_title, first_title),
+            (f"{SAMPLE_BOOK_TITLE} 第1章", f"第1章\n{first_title}"),
+        ):
+            with self.subTest(title=title, headings=headings):
+                raw = Chapter(
+                    1, title,
+                    f"{SAMPLE_BOOK_TITLE} 第1章\n作者：示例作者\n简介：示例简介\n正文卷\n"
+                    f"{headings}\n{expected_content}",
+                )
+                once = adapter.sanitize_chapter(raw, SAMPLE_BOOK_TITLE, True)
+                twice = adapter.sanitize_chapter(once, SAMPLE_BOOK_TITLE, True)
+
+                self.assertEqual(once, Chapter(1, first_title, expected_content))
+                self.assertEqual(twice, once)
+
+    def test_trxs_sanitizer_keeps_next_heading_in_named_nonfirst_chapter(self):
+        adapter = TrxsCcAdapter()
+        next_title = "第4章 示例后续"
+        for prefix in ("本章正文完整保留。" * 8 + "\n", ""):
+            with self.subTest(prefix=prefix):
+                raw = Chapter(7, "第3章 示例当前章", f"{prefix}{next_title}\n后续正文。")
+                once = adapter.sanitize_chapter(raw, SAMPLE_BOOK_TITLE, False)
+
+                self.assertEqual(once, raw)
+                self.assertEqual(adapter.sanitize_chapter(once, SAMPLE_BOOK_TITLE, False), once)
+
+    def test_trxs_sanitizer_does_not_promote_heading_after_continuation_text(self):
+        adapter = TrxsCcAdapter()
+        raw = Chapter(147, "第147节", "上一章续文。\n第4章 示例后续\n后续正文。")
+        once = adapter.sanitize_chapter(raw, SAMPLE_BOOK_TITLE, False)
+
+        self.assertEqual(once, Chapter(147, "第147章", raw.content))
+        self.assertEqual(adapter.sanitize_chapter(once, SAMPLE_BOOK_TITLE, False), once)
+
+    def test_trxs_sanitizer_is_idempotent_with_bare_current_header(self):
+        adapter = TrxsCcAdapter()
+        content = "首章正文。\n第2章 示例后续\n后续正文。"
+        once = adapter.sanitize_chapter(Chapter(1, "第1章", f"第1章\n{content}"), SAMPLE_BOOK_TITLE, True)
+
+        self.assertEqual(once, Chapter(1, "第1章", content))
+        self.assertEqual(adapter.sanitize_chapter(once, SAMPLE_BOOK_TITLE, True), once)
+
+    def test_trxs_sanitizer_keeps_body_before_later_repeated_current_heading(self):
+        adapter = TrxsCcAdapter()
+        title = "第1章 示例当前章"
+        for first_chapter in (True, False):
+            with self.subTest(first_chapter=first_chapter):
+                raw = Chapter(
+                    1 if first_chapter else 7, title,
+                    f"已开始的正文。\n{title}\n后续正文。",
+                )
+                once = adapter.sanitize_chapter(raw, SAMPLE_BOOK_TITLE, first_chapter)
+
+                self.assertEqual(once, raw)
+                self.assertEqual(
+                    adapter.sanitize_chapter(once, SAMPLE_BOOK_TITLE, first_chapter), once
+                )
+
+    def test_trxs_download_and_remerge_preserve_both_embedded_chapters(self):
+        adapter = TrxsCcAdapter()
+        first_title, next_title = "第1章 示例开篇", "第2章 示例后续"
+        first_body, next_body = "首章正文完整保留。" * 8, "次章正文完整保留。" * 8
+        url = "https://www.trxs.cc/tongren/12345/1.html"
+        client = FakeClient({
+            url: chapter_html(
+                1, f"作者：示例作者\n简介：示例简介\n{first_title}\n"
+                f"{first_body}\n{next_title}\n{next_body}",
+            ),
+        })
+        plan = BookPlan(
+            title=SAMPLE_BOOK_TITLE,
+            catalog_url="https://www.trxs.cc/tongren/12345.html",
+            chapters=(ChapterLink(1, "第1节", url),),
+        )
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = download_book(
+                client=client, adapter=adapter, plan=plan,
+                output=root / "book.txt", output_dir=root,
+                cache_root=root / "cache", delay=0, max_pages=5, refresh=False,
+            )
+            self.assertEqual(result.total_chapters, 2)
+            cache = BookCache(root / "cache", adapter.name, plan.catalog_url)
+            cached = cache.read_chapter(1)
+            self.assertEqual(
+                cached, Chapter(1, first_title, f"{first_body}\n{next_title}\n{next_body}")
+            )
+            assembled = adapter.assemble_chapters([cached], SAMPLE_BOOK_TITLE)
+            self.assertEqual([chapter.title for chapter in assembled], [first_title, next_title])
+            self.assertEqual([chapter.content for chapter in assembled], [first_body, next_body])
+            self.assertEqual(validate_assembled(list(assembled)), [])
+            first_text = result.output.read_text(encoding="utf-8")
+            self.assertIn(first_body, first_text)
+            self.assertIn(next_body, first_text)
+
+            merged = merge_from_cache(
+                adapter=adapter, cache_root=root / "cache", catalog_url=plan.catalog_url,
+                output=root / "merged-again.txt", output_dir=root,
+            )
+            self.assertEqual(merged.total_chapters, 2)
+            self.assertEqual(merged.output.read_text(encoding="utf-8"), first_text)
+            self.assertEqual(cache.read_chapter(1), cached)
+        self.assertEqual(client.fetched, [url])
 
     def test_trxs_title_removes_site_author_suffix(self):
         soup = BeautifulSoup(
@@ -659,6 +829,80 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("番外旧缓存", cache.read(3) or "")
             self.assertTrue(list(cache.path.glob("chapters.stale-*")))
 
+    def test_cache_new_url_never_reuses_an_orphaned_number(self):
+        catalog_url = "http://www.23txxt.com/bqg/12345/"
+        links = tuple(
+            ChapterLink(n, f"第{n}章 示例章节", f"{catalog_url}{n}00.html")
+            for n in (1, 2, 3)
+        )
+        old_plan = BookPlan(SAMPLE_BOOK_TITLE, catalog_url, links)
+        short_plan = BookPlan(SAMPLE_BOOK_TITLE, catalog_url, links[:2])
+        new_link = ChapterLink(3, "第3章 示例新增章节", f"{catalog_url}400.html")
+        new_plan = BookPlan(SAMPLE_BOOK_TITLE, catalog_url, links[:2] + (new_link,))
+        old_body, new_body = "已撤回章节旧正文。" * 12, "新增章节正确正文。" * 12
+        for history in ("shrink-grow", "orphan-on-start", "clean-append"):
+            with self.subTest(history=history), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                cache = BookCache(root / "cache", "23txxt", catalog_url)
+                cache.save_plan(old_plan if history == "shrink-grow" else short_plan)
+                for n in (1, 2):
+                    cache.write(Chapter(n, f"第{n}章 示例章节", f"保留第{n}章正文。" * 12))
+                retained = {n: cache.chapter_path(n).read_bytes() for n in (1, 2)}
+                if history != "clean-append":
+                    cache.write(Chapter(3, "第3章 示例旧章节", old_body))
+                    orphan_bytes = cache.chapter_path(3).read_bytes()
+                if history == "shrink-grow":
+                    self.assertEqual(cache.save_plan(short_plan), 0)
+                    self.assertEqual(cache.chapter_path(3).read_bytes(), orphan_bytes)
+                    self.assertEqual(list(cache.path.glob("chapters.stale-*")), [])
+                    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                        shortened = merge_from_cache(
+                            adapter=TxxtAdapter(), cache_root=root / "cache",
+                            catalog_url=catalog_url, output=root / "short.txt", output_dir=root,
+                        )
+                    self.assertEqual(shortened.total_chapters, 2)
+                    self.assertNotIn(old_body, shortened.output.read_text(encoding="utf-8"))
+                client = FakeClient({
+                    new_link.url: f'<h1>{new_link.title}</h1><div id="content">{new_body}</div>'
+                })
+                for mode in ("download", "fill", "offline"):
+                    output = root / f"{mode}.txt"
+                    argv = [
+                        "book-downloader", catalog_url,
+                        "--cache-root", str(root / "cache"), "--output-dir", str(root),
+                        "--output", str(output), "--no-browser-fallback", "--delay", "0",
+                    ]
+                    if mode == "fill":
+                        argv.extend(["--fill-gaps", "--retry-delay", "0"])
+                    elif mode == "offline":
+                        argv.append("--merge-only")
+                    stdout, stderr = StringIO(), StringIO()
+                    with patch("sys.argv", argv), patch(
+                        "book_downloader.cli.HttpClient"
+                    ) as factory, patch(
+                        "book_downloader.cli.discover_book", return_value=new_plan
+                    ), redirect_stdout(stdout), redirect_stderr(stderr):
+                        factory.return_value.fetch.side_effect = client.fetch
+                        code = main()
+                    self.assertEqual(code, 0)
+                    self.assertEqual(stderr.getvalue(), "")
+                    self.assertEqual(client.fetched, [new_link.url])
+                    self.assertIn(new_body, output.read_text(encoding="utf-8"))
+                    self.assertNotIn(old_body, output.read_text(encoding="utf-8"))
+                    self.assertIn(new_body, cache.read(3))
+                    for n, original in retained.items():
+                        self.assertEqual(cache.chapter_path(n).read_bytes(), original)
+                    if mode == "offline":
+                        factory.assert_not_called()
+                stale_dirs = list(cache.path.glob("chapters.stale-*"))
+                if history == "clean-append":
+                    self.assertEqual(stale_dirs, [])
+                else:
+                    self.assertEqual(len(stale_dirs), 1)
+                    self.assertEqual((stale_dirs[0] / "000003.txt").read_bytes(), orphan_bytes)
+                    for n, original in retained.items():
+                        self.assertEqual((stale_dirs[0] / f"{n:06d}.txt").read_bytes(), original)
+
     def test_runner_stops_after_repeated_failures_and_writes_partial_output(self):
         urls = [f"https://www.trxs.cc/tongren/11699/{number}.html" for number in range(1, 5)]
         client = FakeClient(
@@ -818,6 +1062,85 @@ class PipelineTests(unittest.TestCase):
         )
 
 
+class OfflineStorageErrorTests(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.catalog_url = "https://www.trxs.cc/tongren/12345.html"
+        self.cache = BookCache(self.root / "cache", "trxs_cc", self.catalog_url)
+        self.cache.save_plan(BookPlan(
+            SAMPLE_BOOK_TITLE,
+            self.catalog_url,
+            (ChapterLink(1, "第1章", "https://www.trxs.cc/tongren/12345/1.html"),),
+        ))
+        self.body = "新的完整正文保留。" * 12
+        self.cache.write(Chapter(1, "第1章", self.body))
+        self.output = self.root / "example.txt"
+
+    def run_merge(self):
+        stderr = StringIO()
+        argv = [
+            "book-downloader", self.catalog_url, "--merge-only",
+            "--cache-root", str(self.root / "cache"),
+            "--output-dir", str(self.root / "outputs"),
+            "--output", str(self.output),
+        ]
+        with patch("sys.argv", argv), patch(
+            "book_downloader.cli.HttpClient",
+            side_effect=AssertionError("离线合并不应创建网络客户端"),
+        ), redirect_stderr(stderr):
+            code = main()
+        self.assertEqual(code, 1)
+        self.assertNotIn("Traceback", stderr.getvalue())
+        return stderr.getvalue()
+
+    def test_merge_reports_txt_write_failure_and_removes_temporary_file(self):
+        self.output.mkdir()
+
+        error = self.run_merge()
+
+        self.assertIn("TXT", error)
+        self.assertIn("写入", error)
+        self.assertIn(str(self.output), error)
+        self.assertIn("路径", error)
+        self.assertIn("权限", error)
+        self.assertIn("--merge-only", error)
+        self.assertTrue(self.output.is_dir())
+        self.assertFalse(self.output.with_suffix(".txt.tmp").exists())
+
+    def test_merge_reports_sidecar_failure_after_txt_is_generated(self):
+        self.output.write_text("旧正文", encoding="utf-8")
+        sidecar = self.output.with_suffix(".url")
+        sidecar.mkdir()
+
+        error = self.run_merge()
+
+        self.assertIn("TXT 已生成但来源文件未保存", error)
+        self.assertIn(str(sidecar), error)
+        self.assertIn("路径", error)
+        self.assertIn("权限", error)
+        self.assertIn("--merge-only", error)
+        self.assertEqual(self.output.read_text(encoding="utf-8"), f"第1章\n\n{self.body}\n")
+        self.assertTrue(sidecar.is_dir())
+
+    def test_merge_reports_invalid_utf8_cache_without_removing_it(self):
+        chapter_path = self.cache.chapter_path(1)
+        corrupted = b"\xff\xfeinvalid"
+        chapter_path.write_bytes(corrupted)
+
+        error = self.run_merge()
+
+        self.assertIn("第 1 章", error)
+        self.assertIn(str(chapter_path), error)
+        self.assertIn("备份", error)
+        self.assertIn("移走", error)
+        self.assertIn("--fill-gaps", error)
+        self.assertIn("--merge-only", error)
+        self.assertEqual(chapter_path.read_bytes(), corrupted)
+        self.assertFalse(self.output.exists())
+
+
 class FillGapsTests(unittest.TestCase):
     def make_plan(self, catalog_url: str, count: int = 3) -> BookPlan:
         return BookPlan(
@@ -832,6 +1155,65 @@ class FillGapsTests(unittest.TestCase):
                 for number in range(1, count + 1)
             ),
         )
+
+    def test_cli_missing_chapter_hints_match_fill_and_offline_modes(self):
+        catalog_url = "https://www.trxs.cc/tongren/11699.html"
+        second_body = "补齐的第二章正文。" * 8
+        for mode in ("blocked", "success", "offline"):
+            with self.subTest(mode=mode), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                plan = self.make_plan(catalog_url, count=2)
+                cache = BookCache(root / "cache", "trxs_cc", catalog_url)
+                cache.save_plan(plan)
+                cache.write(Chapter(1, "第1章", "已缓存的第一章正文。" * 8))
+                first_cached = cache.read(1)
+                output = root / "example.txt"
+                argv = [
+                    "book-downloader", catalog_url,
+                    "--cache-root", str(root / "cache"),
+                    "--output-dir", str(root / "outputs"),
+                    "--output", str(output), "--no-browser-fallback",
+                ]
+                if mode == "offline":
+                    argv.append("--merge-only")
+                else:
+                    argv.extend([
+                        "--fill-gaps", "--delay", "0",
+                        "--retry-delay", "0", "--retry-rounds", "1",
+                    ])
+                stdout, stderr = StringIO(), StringIO()
+                with patch("sys.argv", argv), patch(
+                    "book_downloader.cli.HttpClient"
+                ) as factory, redirect_stdout(stdout), redirect_stderr(stderr):
+                    client = factory.return_value
+                    if mode == "blocked":
+                        client.fetch.side_effect = AccessBlockedError("站点要求人工验证")
+                    else:
+                        client.fetch.return_value = FetchedPage(
+                            plan.chapters[1].url, chapter_html(2, second_body)
+                        )
+                    code = main()
+                self.assertEqual(cache.read(1), first_cached)
+                self.assertNotIn("Traceback", stderr.getvalue())
+                if mode == "blocked":
+                    self.assertEqual(code, 2)
+                    self.assertNotIn("--merge-only", stderr.getvalue())
+                    self.assertIn("当前 TXT 是部分结果，仍缺章节：2", stderr.getvalue())
+                    self.assertIn("重新运行相同命令", stderr.getvalue())
+                    self.assertEqual(client.fetch.call_count, 2)
+                    self.assertIsNone(cache.read(2))
+                elif mode == "success":
+                    self.assertEqual(code, 0)
+                    self.assertNotIn("部分结果", stdout.getvalue() + stderr.getvalue())
+                    client.fetch.assert_called_once_with(plan.chapters[1].url)
+                    self.assertIn(second_body, output.read_text(encoding="utf-8"))
+                else:
+                    self.assertEqual(code, 0)
+                    factory.assert_not_called()
+                    self.assertIn("缓存缺失 1 章（2）", stderr.getvalue())
+                    self.assertIn("去掉 --merge-only", stderr.getvalue())
+                    self.assertIsNone(cache.read(2))
+                self.assertTrue(output.is_file())
 
     def test_fill_gaps_only_requests_missing_chapters(self):
         catalog_url = "https://www.trxs.cc/tongren/11699.html"
@@ -863,7 +1245,12 @@ class FillGapsTests(unittest.TestCase):
                 retry_rounds=0,
             )
             text = result.output.read_text(encoding="utf-8")
+            cached = cache.read_chapter(2)
+            self.assertIsNotNone(cached)
+            self.assertIn("第二章正文内容", cached.content)
 
+        self.assertEqual(result.failed_chapters, ())
+        self.assertEqual(report_result(result), 0)
         self.assertEqual(client.fetched, ["https://www.trxs.cc/tongren/11699/2.html"])
         self.assertEqual(result.total_chapters, 3)
         self.assertIn("第二章正文内容", text)
@@ -887,6 +1274,7 @@ class FillGapsTests(unittest.TestCase):
             plan = self.make_plan(catalog_url, count=2)
             cache.save_plan(plan)
             cache.write(Chapter(1, "第1章", "第一章正文内容，已缓存。"))
+            first_cached = cache.read(1)
 
             result = fill_cache_gaps(
                 client=client,
@@ -900,9 +1288,84 @@ class FillGapsTests(unittest.TestCase):
                 retry_delay=0,
                 retry_rounds=2,
             )
+            self.assertEqual(cache.read(1), first_cached)
+            self.assertIsNone(cache.read(2))
 
         self.assertEqual(client.calls, 3)
         self.assertEqual(result.total_chapters, 1)
+        self.assertEqual(result.failed_chapters, (2,))
+        self.assertEqual(report_result(result), 2)
+
+    def test_fill_gaps_preserves_download_errors_and_interruptions(self):
+        catalog_url = "https://www.trxs.cc/tongren/11699.html"
+        for error in (DownloaderError("离线夹具：下载失败"), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__):
+                class FailingClient(FakeClient):
+                    def fetch(self, url: str) -> FetchedPage:
+                        self.fetched.append(url)
+                        raise error
+
+                client = FailingClient({})
+                with TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    cache = BookCache(root / "cache", "trxs_cc", catalog_url)
+                    plan = self.make_plan(catalog_url, count=2)
+                    cache.save_plan(plan)
+                    cache.write(Chapter(1, "第1章", "已缓存的第一章正文。" * 8))
+                    first_cached = cache.read(1)
+
+                    result = fill_cache_gaps(
+                        client=client, adapter=TrxsCcAdapter(), cache_root=root / "cache",
+                        catalog_url=catalog_url, output=root / "failed.txt", output_dir=root,
+                        delay=0, max_pages=5, retry_delay=0, retry_rounds=1,
+                    )
+                    self.assertEqual(cache.read(1), first_cached)
+                    self.assertIsNone(cache.read(2))
+                self.assertEqual(client.fetched, [plan.chapters[1].url] * 2)
+                self.assertEqual(result.total_chapters, 1)
+                self.assertEqual(result.failed_chapters, (2,))
+                self.assertEqual(report_result(result), 2)
+
+    def test_fill_gaps_clears_resolved_failures_after_retry(self):
+        catalog_url = "https://www.trxs.cc/tongren/11699.html"
+        plan = self.make_plan(catalog_url, count=2)
+        second_url = plan.chapters[1].url
+        second_body = "补齐的第二章正文。" * 8
+
+        class RecoveringClient(FakeClient):
+            def __init__(self):
+                super().__init__({second_url: chapter_html(2, second_body)})
+                self.attempts = 0
+
+            def fetch(self, url: str) -> FetchedPage:
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise AccessBlockedError("离线夹具：首次访问受阻")
+                return super().fetch(url)
+
+        client = RecoveringClient()
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = BookCache(root / "cache", "trxs_cc", catalog_url)
+            cache.save_plan(plan)
+            cache.write(Chapter(1, "第1章", "已缓存的第一章正文。" * 8))
+            first_cached = cache.read(1)
+
+            result = fill_cache_gaps(
+                client=client, adapter=TrxsCcAdapter(), cache_root=root / "cache",
+                catalog_url=catalog_url, output=root / "filled.txt", output_dir=root,
+                delay=0, max_pages=5, retry_delay=0, retry_rounds=1,
+            )
+            self.assertEqual(cache.read(1), first_cached)
+            cached = cache.read_chapter(2)
+            self.assertIsNotNone(cached)
+            self.assertEqual(cached.content, second_body)
+            self.assertIn(second_body, result.output.read_text(encoding="utf-8"))
+        self.assertEqual(client.attempts, 2)
+        self.assertEqual(client.fetched, [second_url])
+        self.assertEqual(result.total_chapters, 2)
+        self.assertEqual(result.failed_chapters, ())
+        self.assertEqual(report_result(result), 0)
 
 
 class AssembledValidationTests(unittest.TestCase):

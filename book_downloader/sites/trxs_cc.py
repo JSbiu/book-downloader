@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from ..errors import DownloaderError
 from ..models import Chapter, SiteSearchHit, SiteSearchRequest
 from .base import SiteAdapter
+from ..operation import check_cancelled, emit, warning
 from .common import absolute_url, clean_lines, extract_content
 
 # 正文里埋藏的真实章节标题："第N章 名称"。名称前可能有少量杂质前缀
@@ -132,9 +133,11 @@ class TrxsCcAdapter(SiteAdapter):
             timeout=int(navigation_timeout * 1000),
         )
         input_box = None
+        emit("verification", message="正在浏览器中搜索；若出现验证，请在验证窗口手动完成")
         deadline = time.monotonic() + verification_timeout
         printed = False
         while time.monotonic() < deadline:
+            check_cancelled()
             candidate = page.locator("input[name='keyboard']").first
             try:
                 candidate.wait_for(state="visible", timeout=800)
@@ -157,8 +160,10 @@ class TrxsCcAdapter(SiteAdapter):
 
         input_box.fill(query)
         input_box.press("Enter")
+        emit("verification", message="正在浏览器中搜索；若出现验证，请在验证窗口手动完成")
         deadline = time.monotonic() + verification_timeout
         while time.monotonic() < deadline:
+            check_cancelled()
             if page.locator("div.bk").count() > 0:
                 break
             page.wait_for_timeout(1000)
@@ -187,27 +192,52 @@ class TrxsCcAdapter(SiteAdapter):
         lines = [line for line in lines if not title_pattern.match(line)]
         lines = [line for line in lines if line.strip() not in {"正文卷", "正文"}]
 
-        chapter_heading = re.compile(r"^\s*第\s*\d+\s*[章节回].*$")
-        if first_chapter:
-            for index, line in enumerate(lines):
-                if chapter_heading.match(line):
-                    lines = lines[index:]
-                    break
-
         normalized_title = clean_lines(chapter.title)
         if normalized_title.startswith(book_title):
             normalized_title = normalized_title[len(book_title) :].strip(" ：:—-_")
-        # trxs 目录链接用"第N节"式纯编号，而章节页页眉写作"书名 第N章"；
-        # 光杆"第N节"统一成"第N章"，阅读器才能按章节识别（带名称的标题不动）。
+        # 光杆“第N节”是分页编号，带名称的标题保持原样。
         if re.fullmatch(r"第\s*\d+\s*节", normalized_title):
             normalized_title = re.sub(r"节\s*$", "章", normalized_title)
-        for line in lines[:2]:
-            if chapter_heading.match(line):
-                normalized_title = line
-                lines.remove(line)
-                break
         if not normalized_title or normalized_title == book_title:
             normalized_title = f"第{chapter.number}章"
+
+        chapter_heading = re.compile(r"^\s*第\s*(\d+)\s*([章节回])\s*(.*)$")
+        title_heading = chapter_heading.match(normalized_title)
+
+        def is_current_heading(line: str) -> bool:
+            heading = chapter_heading.match(line)
+            if not heading:
+                return False
+            if title_heading is None:
+                return True
+            return (
+                int(heading.group(1)) == int(title_heading.group(1))
+                and heading.group(2) == title_heading.group(2)
+            )
+
+        # 已净化正文也可能有后续标题；只有明确的元信息才作为简介裁剪依据。
+        if first_chapter:
+            for index, line in enumerate(lines):
+                if is_current_heading(line):
+                    if any(
+                        item == book_title or re.match(r"^(?:作者|简介)\s*[:：]", item)
+                        for item in lines[:index]
+                    ):
+                        lines = lines[index:]
+                    break
+
+        # 只提升正文开头的标题，保留续文之后及后续章节的嵌入标题。
+        if lines and (title_heading is None or not title_heading.group(3)):
+            leading = chapter_heading.match(lines[0])
+            if leading:
+                normalized_title = lines[0]
+                title_heading = leading
+        while lines and is_current_heading(lines[0]):
+            heading = chapter_heading.match(lines[0])
+            if heading.group(3):
+                normalized_title = lines[0]
+                title_heading = heading
+            del lines[0]
 
         return Chapter(
             number=chapter.number,

@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from shutil import copy2
 
+from .errors import DownloaderError
 from .models import BookPlan, Chapter
 
 
@@ -57,6 +58,10 @@ class BookCache:
                         old_by_number[number] != new_by_number[number]
                         for number in common_numbers
                     )
+                    or any(
+                        self.chapter_path(number).exists()
+                        for number in new_by_number.keys() - old_by_number.keys()
+                    )
                 )
             except (OSError, KeyError, TypeError, ValueError):
                 mapping_changed = True
@@ -94,7 +99,13 @@ class BookCache:
         path = self.chapter_path(number)
         if not path.exists():
             return None
-        text = path.read_text(encoding="utf-8").strip()
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError as error:
+            raise DownloaderError(
+                f"第 {number} 章缓存不是有效 UTF-8：{path}；"
+                "请先备份并移走该文件，再用 --fill-gaps 或去掉 --merge-only 补抓。"
+            ) from error
         return text or None
 
     def read_chapter(self, number: int) -> Chapter | None:

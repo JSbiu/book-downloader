@@ -6,6 +6,10 @@ class AccessBlockedError(DownloaderError):
     """服务器要求额外验证或拒绝了自动请求。"""
 
 
+class BrowserInteractionTimeout(AccessBlockedError):
+    """浏览器确认等待已超时；搜索不得再次导航到首页重试。"""
+
+
 class VerificationPageError(AccessBlockedError):
     """页面是真人验证页（如 Cloudflare challenge），需要人工完成验证。"""
 

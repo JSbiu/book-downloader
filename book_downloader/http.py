@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import requests
 
 from .errors import AccessBlockedError, NetworkError, VerificationPageError
+from .operation import check_cancelled, wait
 
 
 USER_AGENT = (
@@ -73,6 +73,7 @@ class HttpClient:
     ) -> FetchedPage:
         last_error: Exception | None = None
         for attempt in range(1, self.retries + 1):
+            check_cancelled()
             try:
                 response = self.session.request(
                     method=method,
@@ -107,6 +108,6 @@ class HttpClient:
             except requests.RequestException as error:
                 last_error = error
                 if attempt < self.retries:
-                    time.sleep(min(2 ** (attempt - 1), 8))
+                    wait(min(2 ** (attempt - 1), 8))
                     continue
         raise NetworkError(f"请求失败：{url}；{last_error}")

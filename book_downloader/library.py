@@ -29,7 +29,7 @@ def _count_cached_chapters(chapter_dir: Path) -> int:
     return sum(1 for path in chapter_dir.glob("*.txt") if path.stem.isdigit())
 
 
-def load_library(cache_root: Path, output_dir: Path) -> list[LibraryEntry]:
+def load_library(cache_root: Path, output_dir: Path, *, on_warning=None) -> list[LibraryEntry]:
     """汇总缓存目录与输出目录的来源文件，返回已收录书目（按目录 URL 去重）。
 
     缓存侧来源是 ``cache/<站点>/<目录哈希>/book.json``；来源文件侧是
@@ -62,7 +62,9 @@ def load_library(cache_root: Path, output_dir: Path) -> list[LibraryEntry]:
         for sidecar in sorted(output_dir.glob("*.url")):
             try:
                 catalog_url = sidecar.read_text(encoding="utf-8").strip()
-            except OSError:
+            except (OSError, UnicodeError):
+                if on_warning:
+                    on_warning(f"来源文件无法读取：{sidecar}；请先备份并修正或移走该文件，其他书目仍可使用。")
                 continue
             if not catalog_url:
                 continue

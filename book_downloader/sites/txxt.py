@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from ..errors import DownloaderError
 from ..models import Chapter, ChapterLink, SiteSearchHit, SiteSearchRequest
 from .base import SiteAdapter
+from ..operation import check_cancelled, emit, warning
 from .common import (
     absolute_url,
     chapter_number_from_text,
@@ -125,9 +126,11 @@ class TxxtAdapter(SiteAdapter):
             timeout=int(navigation_timeout * 1000),
         )
         input_box = None
+        emit("verification", message="正在浏览器中搜索；若出现验证，请在验证窗口手动完成")
         deadline = time.monotonic() + verification_timeout
         printed = False
         while time.monotonic() < deadline:
+            check_cancelled()
             for name in self.search_input_names:
                 candidate = page.locator(f"input[name='{name}']").first
                 try:
@@ -185,8 +188,10 @@ class TxxtAdapter(SiteAdapter):
 
         input_box.fill(query)
         input_box.press("Enter")
+        emit("verification", message="正在浏览器中搜索；若出现验证，请在验证窗口手动完成")
         deadline = time.monotonic() + verification_timeout
         while time.monotonic() < deadline:
+            check_cancelled()
             if page.locator("a[href*='/bqg/']").count() > 0:
                 break
             page.wait_for_timeout(1000)

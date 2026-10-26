@@ -147,6 +147,7 @@ def report_result(result, label: str = "") -> int:
         )
     if result.failed_chapters:
         missing = format_number_ranges(result.failed_chapters)
+        print(f"当前 TXT 是部分结果，仍缺章节：{missing}。", file=sys.stderr)
         print(f"未成功章节：{missing}", file=sys.stderr)
         print("重新运行相同命令即可利用缓存，只重试缺失章节。", file=sys.stderr)
         return 2

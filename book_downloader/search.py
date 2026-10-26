@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import re
 import sys
 from urllib.parse import urlsplit
 
-from .errors import AccessBlockedError, ConfigurationError, DownloaderError, NetworkError, SearchError
+from .errors import BrowserInteractionTimeout, AccessBlockedError, ConfigurationError, DownloaderError, NetworkError, SearchError
 from .http import HttpClient
 from .models import SiteSearchHit, SiteSearchRequest
 from .sites.base import SiteAdapter
+from .operation import check_cancelled, emit, warning
 from .sites.registry import searchable_adapters
 
 
@@ -125,9 +126,11 @@ def _page_search_hits(
             limit,
             verification_timeout=verification_timeout,
         )
+    except BrowserInteractionTimeout:
+        raise
     except (ConfigurationError, AccessBlockedError, NetworkError, DownloaderError) as error:
         # 失败原因打印到 stderr，方便诊断（如输入框未找到、验证超时等）。
-        print(f"{adapter.name} 页面搜索失败：{error}", file=sys.stderr)
+        warning(f"{adapter.name} 页面搜索失败：{error}")
         return None
 
 
@@ -180,6 +183,8 @@ def _search_one_site(
     *,
     verification_timeout: float,
 ) -> tuple[str, tuple[SearchResult, ...]]:
+    check_cancelled()
+    emit("progress", phase="search", message=f"正在搜索 {adapter.name}")
     try:
         page = client.fetch(
             request.url,
@@ -188,6 +193,8 @@ def _search_one_site(
             headers=dict(request.headers),
             response_encoding=request.response_encoding,
         )
+    except BrowserInteractionTimeout:
+        raise
     except (AccessBlockedError, NetworkError):
         # 浏览器模式下即使 HTTP 请求被 WAF 拦截，也可以回退到真实页面搜索
         # （页面验证由用户手动完成，脚本只负责等待和解析）。
@@ -230,18 +237,17 @@ def _search_site_requests(
     verification_timeout: float,
 ) -> tuple[tuple[str, tuple[SearchResult, ...]], ...]:
     if len(site_requests) <= 1 or not getattr(client, "supports_concurrent_requests", False):
-        return tuple(
-            _search_one_site(
-                client,
-                adapter,
-                request,
-                query,
-                limit,
-                filter_hits,
+        outcomes = []
+        for adapter, request in site_requests:
+            outcomes.append(_search_one_site(
+                client, adapter, request, query, limit, filter_hits,
                 verification_timeout=verification_timeout,
-            )
-            for adapter, request in site_requests
-        )
+            ))
+            merged = _merge_result_sets(tuple(item[1] for item in outcomes), limit * 2)
+            results = sorted(merged, key=lambda item: _relevance_score(item.title, query), reverse=True)[:limit]
+            emit("search_results", results=[asdict(item) for item in results],
+                 current=len(outcomes), total=len(site_requests), site=adapter.name)
+        return tuple(outcomes)
 
     with ThreadPoolExecutor(max_workers=min(4, len(site_requests))) as executor:
         futures = tuple(
@@ -314,10 +320,9 @@ def search_sites(
     )[:limit]
     if results:
         if blocked_sites:
-            print(
+            warning(
                 f"提示：{', '.join(blocked_sites)} 因站点验证未能参与本次搜索；"
-                "可加 --browser 或 --browser-connect 在浏览器中人工完成验证后重试。",
-                file=sys.stderr,
+                "可加 --browser 或 --browser-connect 在浏览器中人工完成验证后重试。"
             )
         return results
 

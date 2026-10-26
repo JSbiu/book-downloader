@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import sys
-import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from .cache import BookCache
 from .errors import AccessBlockedError, DownloaderError
 from .http import HttpClient
 from .models import BookPlan, Chapter, ChapterLink
+from .operation import OperationCancelled, check_cancelled, emit, wait, warning
 from .sites.base import SiteAdapter
 
 
@@ -23,6 +23,8 @@ class DownloadResult:
     failed_chapters: tuple[int, ...]
     skipped_chapters: int = 0
     interrupted: bool = False
+    missing_chapters: tuple[int, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 def safe_filename(name: str) -> str:
@@ -47,12 +49,14 @@ def chapter_from_pages(
     title = link.title
 
     for _ in range(max_pages):
+        check_cancelled()
         normalized_current = adapter.normalize_url(current_url)
         if normalized_current in visited:
             raise DownloaderError(f"第 {link.number} 章检测到分页链接循环")
         visited.add(normalized_current)
 
         page = client.fetch(current_url)
+        check_cancelled()
         parsed = adapter.parse_chapter(page.text, link.number)
         if not title or not title.lstrip().startswith("第"):
             title = parsed.title
@@ -121,7 +125,10 @@ def download_book(
 
     for index, link in enumerate(selected_chapters, start=1):
         try:
+            check_cancelled()
+            emit("progress", phase="download", current=index - 1, total=len(selected_chapters), message=link.title)
             if cache.read(link.number) and not refresh:
+                emit("progress", current=index, total=len(selected_chapters), cached=True)
                 print(f"[{index}/{len(selected_chapters)}] {link.title}：使用缓存")
                 continue
 
@@ -134,10 +141,15 @@ def download_book(
                 max_pages=max_pages,
             )
             cache.write(chapter)
+            emit("progress", current=index, total=len(selected_chapters))
             consecutive_failures = 0
             if delay and index < len(selected_chapters):
-                time.sleep(delay)
+                wait(delay)
+        except OperationCancelled:
+            interrupted = True
+            break
         except AccessBlockedError as error:
+            emit("blocked", message=str(error))
             failed.add(link.number)
             stopped_at = index
             print(f"  已停止：{error}")
@@ -146,6 +158,7 @@ def download_book(
             failed.add(link.number)
             consecutive_failures += 1
             print(f"  跳过：{error}")
+            emit("warning", message=str(error))
             if consecutive_failures >= max_consecutive_failures:
                 stopped_at = index
                 print(
@@ -229,18 +242,22 @@ def merge_cached_chapters(
     skipped_chapters: int = 0,
     interrupted: bool = False,
     offline: bool = False,
+    filling_gaps: bool = False,
 ) -> DownloadResult:
     """把缓存章节按当前净化规则重新处理并合并成 TXT。
 
     重跑净化与分段规则都走这里，因此缓存内容不需要重新下载即可被
     修正。offline=True 时不做任何网络请求：缺失的缓存只提示，不计失败。
     """
+    emit("progress", phase="merge", message="正在整理缓存并生成 TXT")
     cleaned_chapters: list[Chapter] = []
     cleaned_cache_count = 0
     missing: list[int] = []
+    all_missing: list[int] = []
     for link in selected_chapters:
         cached = cache.read_chapter(link.number)
         if cached is None:
+            all_missing.append(link.number)
             if offline:
                 missing.append(link.number)
             elif not interrupted:
@@ -261,9 +278,13 @@ def merge_cached_chapters(
     if missing:
         preview = "、".join(str(number) for number in missing[:10])
         suffix = "…" if len(missing) > 10 else ""
+        recovery = (
+            "重新运行相同命令可继续补齐缺失章节。"
+            if filling_gaps
+            else "去掉 --merge-only 重新运行可补齐后再合并。"
+        )
         print(
-            f"缓存缺失 {len(missing)} 章（{preview}{suffix}）；"
-            "去掉 --merge-only 重新运行可补齐后再合并。",
+            f"缓存缺失 {len(missing)} 章（{preview}{suffix}）；{recovery}",
             file=sys.stderr,
         )
 
@@ -271,8 +292,9 @@ def merge_cached_chapters(
         cleaned_chapters,
         book_title=plan.title,
     )
-    for finding in validate_assembled(list(assembled_chapters)):
-        print(f"自检提示：{finding}", file=sys.stderr)
+    findings = validate_assembled(list(assembled_chapters))
+    for finding in findings:
+        warning(f"自检提示：{finding}")
     blocks = [
         (chapter.number, chapter.block)
         for chapter in assembled_chapters
@@ -286,22 +308,45 @@ def merge_cached_chapters(
 
     output_path = output or (output_dir / f"{safe_filename(plan.title)}.txt")
     output_path = output_path.resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_output = output_path.with_suffix(output_path.suffix + ".tmp")
-    temporary_output.write_text(
-        "\n\n".join(block for _, block in blocks) + "\n",
-        encoding="utf-8",
-    )
-    temporary_output.replace(output_path)
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_output.write_text(
+            "\n\n".join(block for _, block in blocks) + "\n",
+            encoding="utf-8",
+        )
+        temporary_output.replace(output_path)
+    except OSError as error:
+        cleanup_note = ""
+        try:
+            temporary_output.unlink(missing_ok=True)
+        except OSError:
+            cleanup_note = f"；临时文件未能清理：{temporary_output}"
+        raise DownloaderError(
+            f"TXT 写入或替换失败：{output_path}（{error.strerror}）；"
+            "请修正输出路径或权限后用 --merge-only 重试。"
+            f"{cleanup_note}"
+        ) from error
+    emit("output", output=str(output_path), total_chapters=len(blocks),
+         failed_chapters=tuple(sorted(failed)), missing_chapters=tuple(all_missing),
+         warnings=tuple(findings), interrupted=interrupted, skipped_chapters=skipped_chapters)
     # 目录 URL 写进输出旁边的 .url 来源文件：缓存被清理后，--update 仍能找到更新入口。
     sidecar_path = output_path.with_suffix(".url")
-    sidecar_path.write_text(f"{plan.catalog_url}\n", encoding="utf-8")
+    try:
+        sidecar_path.write_text(f"{plan.catalog_url}\n", encoding="utf-8")
+    except OSError as error:
+        raise DownloaderError(
+            f"TXT 已生成但来源文件未保存：{sidecar_path}（{error.strerror}）；"
+            f"TXT 路径：{output_path}；请修正来源文件路径或权限后用 --merge-only 重试。"
+        ) from error
     return DownloadResult(
         output=output_path,
         total_chapters=len(blocks),
         failed_chapters=tuple(sorted(failed)),
         skipped_chapters=skipped_chapters,
         interrupted=interrupted,
+        missing_chapters=tuple(all_missing),
+        warnings=tuple(findings),
     )
 
 
@@ -401,13 +446,20 @@ def fill_cache_gaps(
         print(f"待补齐 {len(pending)} 章（{pending[0].number}–{pending[-1].number}）。")
 
     failed: set[int] = set()
+    interrupted = False
     for round_index in range(retry_rounds + 1):
         if round_index and failed:
             print(f"等待 {retry_delay:.0f} 秒后重试 {len(failed)} 个失败章节……")
-            time.sleep(retry_delay)
+            try:
+                wait(retry_delay)
+            except OperationCancelled:
+                interrupted = True
+                break
         still_failed: set[int] = set()
         for index, link in enumerate(pending, start=1):
             try:
+                check_cancelled()
+                emit("progress", phase="fill", current=index - 1, total=len(pending), message=link.title)
                 print(f"[{index}/{len(pending)}] {link.title}：{link.url}")
                 chapter = chapter_from_pages(
                     client=client,
@@ -417,21 +469,28 @@ def fill_cache_gaps(
                     max_pages=max_pages,
                 )
                 cache.write(chapter)
+                emit("progress", current=index, total=len(pending))
                 if delay and index < len(pending):
-                    time.sleep(delay)
+                    wait(delay)
+            except OperationCancelled:
+                interrupted = True
+                still_failed.update(link.number for link in pending[index - 1:])
+                break
             except AccessBlockedError as error:
+                emit("blocked", message=str(error))
                 print(f"  已停止本轮：{error}")
                 still_failed.update(link.number for link in pending[index - 1:])
                 break
             except DownloaderError as error:
                 print(f"  跳过：{error}")
+                emit("warning", message=str(error))
                 still_failed.add(link.number)
             except KeyboardInterrupt:
                 print("检测到 Ctrl+C，已停止补齐；已完成章节保留在缓存。")
                 still_failed.update(link.number for link in pending[index - 1:])
                 break
         failed = still_failed
-        if not failed:
+        if interrupted or not failed:
             break
         pending = [link for link in pending if link.number in failed]
 
@@ -442,6 +501,8 @@ def fill_cache_gaps(
         selected_chapters=plan.chapters,
         output=output,
         output_dir=output_dir,
-        failed=set(),
+        failed=failed,
         offline=True,
+        filling_gaps=True,
+        interrupted=interrupted,
     )

@@ -7,14 +7,21 @@ from collections.abc import Mapping
 from pathlib import Path
 from shutil import which
 from urllib.parse import urlsplit
+from xml.sax.saxutils import escape
 
 import requests
 
 from .errors import AccessBlockedError, ConfigurationError, NetworkError
 from .http import FetchedPage, USER_AGENT, looks_like_verification_page
+from .operation import OperationCancelled, check_cancelled, emit, wait
 from .sites.registry import adapter_for_url
 
 AUTO_CDP_PORTS = (9222, 9223, 9224)
+
+# WSL 中的 Chromium 默认没有中文字体，页面上的中文会渲染成方框。
+# 只在浏览器 profile 内生成局部 Fontconfig 配置，引用 Windows 自带字体。
+WINDOWS_FONTS_DIR = Path("/mnt/c/Windows/Fonts")
+WSL_CHINESE_FONTS = ("msyh.ttc", "msyhbd.ttc", "simhei.ttf", "simsun.ttc")
 
 
 def should_use_browser(url: str, http_fallback) -> bool:
@@ -40,16 +47,71 @@ def _probe_cdp(port: int, timeout: float = 2.0) -> bool:
         return False
 
 
+def _wsl_fontconfig_file(profile_dir: Path) -> Path | None:
+    """为 WSL 中新启动的 Chromium 生成局部 Fontconfig 配置，修复中文方框。
+
+    仅在 WSL 且能读到 Windows 中文字体时生效：用软链接引用字体而不复制，
+    <include> 保留 /etc/fonts/fonts.conf 的系统配置，生成文件与字体缓存都留在
+    传入的 profile 子目录内。条件不满足时返回 None，保持原有启动行为。
+    """
+    if os.environ.get("FONTCONFIG_FILE") or not os.environ.get("WSL_DISTRO_NAME"):
+        return None
+    font_file = None
+    for name in WSL_CHINESE_FONTS:
+        candidate = WINDOWS_FONTS_DIR / name
+        if candidate.is_file():
+            font_file = candidate
+            break
+    if font_file is None:
+        return None
+    config_dir = profile_dir / "fontconfig"
+    fonts_dir = config_dir / "fonts"
+    try:
+        fonts_dir.mkdir(parents=True, exist_ok=True)
+        link = fonts_dir / font_file.name
+        if not link.exists():
+            if link.is_symlink():
+                link.unlink()
+            link.symlink_to(font_file)
+        config_file = config_dir / "fonts.conf"
+        config_file.write_text(
+            '<?xml version="1.0"?>\n'
+            '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+            "<fontconfig>\n"
+            '  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>\n'
+            f"  <dir>{escape(str(fonts_dir))}</dir>\n"
+            f"  <cachedir>{escape(str(config_dir / 'cache'))}</cachedir>\n"
+            "</fontconfig>\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        return None
+    return config_file
+
+
+def _browser_environment(profile_dir: Path) -> dict[str, str] | None:
+    """返回补充了局部 Fontconfig 的启动环境；无需修复时返回 None。"""
+    config_file = _wsl_fontconfig_file(profile_dir)
+    if config_file is None:
+        return None
+    return {**os.environ, "FONTCONFIG_FILE": str(config_file)}
+
+
 def _start_default_browser(port: int, profile_dir: Path, executable: Path) -> None:
     """启动默认浏览器的调试实例（独立配置目录，不影响日常浏览）。"""
+    environment = _browser_environment(profile_dir)
+    extra_options = {} if environment is None else {"env": environment}
     subprocess.Popen(
         [
             str(executable),
             f"--remote-debugging-port={port}",
             f"--user-data-dir={str(profile_dir)}",
+            "--no-first-run",
+            "--no-default-browser-check",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        **extra_options,
     )
 
 
@@ -75,7 +137,11 @@ def same_target_document(actual_url: str, requested_url: str) -> bool:
     )
 
 
-def find_chrome_executable(explicit: Path | None = None) -> Path:
+def find_chrome_executable(
+    explicit: Path | None = None,
+    *,
+    playwright=None,
+) -> Path:
     """Find a locally installed Chromium-based browser executable."""
     if explicit:
         path = explicit.expanduser().resolve()
@@ -83,9 +149,17 @@ def find_chrome_executable(explicit: Path | None = None) -> Path:
             return path
         raise ConfigurationError(f"浏览器可执行文件不存在：{path}")
 
-    path_from_path = which("chrome")
-    if path_from_path:
-        return Path(path_from_path).resolve()
+    for command in (
+        "chrome",
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "microsoft-edge",
+    ):
+        path_from_path = which(command)
+        if path_from_path:
+            return Path(path_from_path).resolve()
 
     candidates: list[Path] = []
     for variable, suffix in (
@@ -102,6 +176,24 @@ def find_chrome_executable(explicit: Path | None = None) -> Path:
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
+    if playwright is not None:
+        try:
+            path = Path(playwright.chromium.executable_path)
+            if path.is_file():
+                return path.resolve()
+        except Exception:
+            pass
+
+    try:
+        cache_root = Path.home() / ".cache/ms-playwright"
+        for candidate in sorted(
+            cache_root.glob("chromium-*/chrome-linux*/chrome"), reverse=True
+        ):
+            if candidate.is_file():
+                return candidate.resolve()
+    except Exception:
+        pass
+
     raise ConfigurationError(
         "找不到 Chrome/Edge 浏览器；请安装 Chromium 浏览器，或通过 "
         "--browser-executable 指定可执行文件"
@@ -148,6 +240,7 @@ class BrowserHttpClient:
         self._browser = None
         self._context = None
         self._page = None
+        self._page_created = False
         self._owns_browser = False
         self._owns_context = False
 
@@ -162,19 +255,30 @@ class BrowserHttpClient:
                 if not self._browser.contexts:
                     raise ConfigurationError("已连接 Chrome，但没有可用浏览器上下文")
                 self._context = self._browser.contexts[0]
-                pages = [page for page in self._context.pages if not page.is_closed()]
-                self._page = pages[0] if pages else self._context.new_page()
+                self._select_page()
             else:
-                browser_path = find_chrome_executable(executable_path)
+                browser_path = find_chrome_executable(
+                    executable_path, playwright=self._playwright
+                )
                 profile_path = (profile_dir or Path("cache/browser-profile")).expanduser().resolve()
                 profile_path.mkdir(parents=True, exist_ok=True)
+                environment = _browser_environment(profile_path)
+                launch_options: dict[str, object] = {
+                    "user_data_dir": str(profile_path),
+                    "executable_path": str(browser_path),
+                    "headless": False,
+                }
+                if environment is not None:
+                    launch_options["env"] = environment
                 self._context = self._playwright.chromium.launch_persistent_context(
-                    user_data_dir=str(profile_path),
-                    executable_path=str(browser_path),
-                    headless=False,
+                    **launch_options
                 )
                 self._page = self._context.new_page()
+                self._page_created = True
                 self._owns_context = True
+        except OperationCancelled:
+            self.close()
+            raise
         except Exception as error:
             self.close()
             if isinstance(error, ConfigurationError):
@@ -221,7 +325,9 @@ class BrowserHttpClient:
             if _probe_cdp(port):
                 print(f"已复用浏览器调试端口 {port}。")
                 return f"http://127.0.0.1:{port}"
-        browser_path = find_chrome_executable(executable_path)
+        browser_path = find_chrome_executable(
+            executable_path, playwright=self._playwright
+        )
         profile = profile_dir.expanduser().resolve()
         profile.mkdir(parents=True, exist_ok=True)
         print(
@@ -230,22 +336,43 @@ class BrowserHttpClient:
         _start_default_browser(AUTO_CDP_PORTS[0], profile, browser_path)
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
+            check_cancelled()
             if _probe_cdp(AUTO_CDP_PORTS[0]):
                 print("浏览器已就绪。")
                 return f"http://127.0.0.1:{AUTO_CDP_PORTS[0]}"
-            time.sleep(1)
+            wait(1)
         raise ConfigurationError(
             "自动启动浏览器超时；可手动运行 "
             "chrome --remote-debugging-port=9222 后重试"
         )
 
+    def _select_page(self) -> None:
+        """复用普通网页；已有起始页不适合导航时新建空白页。"""
+        self._page_created = False
+        for page in self._context.pages:
+            if not page.is_closed() and urlsplit(page.url).scheme in ("http", "https"):
+                self._page = page
+                return
+        self._page = self._context.new_page()
+        self._page_created = True
+
     def _ensure_page(self) -> None:
-        """连接模式下页面可能被用户手动关闭；失效时重建一个可用页面。"""
+        """标签页失效时，在仍可用的自有或连接上下文中恢复。"""
         if (
             self._context is not None
+            and not self._context.is_closed()
             and self._page is not None
             and not self._page.is_closed()
+            and (
+                urlsplit(self._page.url).scheme in ("http", "https")
+                or (self._page_created and self._page.url == "about:blank")
+            )
         ):
+            return
+        if self._owns_context:
+            if self._context is None or self._context.is_closed():
+                raise NetworkError("浏览器窗口已关闭；请重新运行命令以启动浏览器")
+            self._select_page()
             return
         contexts = (
             [item for item in self._browser.contexts if not item.is_closed()]
@@ -258,10 +385,10 @@ class BrowserHttpClient:
                 "--remote-debugging-port=9222 对应窗口"
             )
         self._context = contexts[0]
-        pages = [page for page in self._context.pages if not page.is_closed()]
-        self._page = pages[0] if pages else self._context.new_page()
+        self._select_page()
 
     def _wait_for_manual_verification(self, url: str) -> None:
+        emit("verification", url=url, message="请在验证浏览器中完成人工验证，完成后自动继续")
         print(
             f"\n浏览器正在等待人工验证：{url}\n"
             "请在打开的浏览器窗口中完成验证；脚本会自动等待页面恢复，不需要按回车。"
@@ -269,13 +396,15 @@ class BrowserHttpClient:
         deadline = time.monotonic() + self.verification_timeout
         stable_checks = 0
         while time.monotonic() < deadline:
+            check_cancelled()
             try:
                 if self._target_page_is_readable(url):
                     stable_checks += 1
                     if stable_checks >= 2:
                         # 验证刚通过时站点风控仍在盯梢，稍作冷却再继续，
                         # 降低连续请求再次触发验证的概率。
-                        time.sleep(3)
+                        wait(3)
+                        emit("running", message="人工验证已通过，继续下载")
                         return
                 else:
                     stable_checks = 0
@@ -319,6 +448,7 @@ class BrowserHttpClient:
             )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            check_cancelled()
             if not same_target_document(self._page.url or "", url):
                 raise NetworkError(f"浏览器没有停留在 Google 搜索页：{url}")
             try:
@@ -338,6 +468,7 @@ class BrowserHttpClient:
     def _wait_for_readable_target(self, url: str, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            check_cancelled()
             if self._target_page_is_readable(url):
                 return True
             if self._visible_page_is_verification():
@@ -426,6 +557,8 @@ class BrowserHttpClient:
                 navigation_timeout=self.timeout,
                 verification_timeout=timeout,
             )
+        except self._playwright_error as error:
+            raise NetworkError(f"浏览器页面搜索失败：{error}") from error
 
     def fetch(
         self,
@@ -456,6 +589,7 @@ class BrowserHttpClient:
                 response_encoding=response_encoding,
             )
 
+        check_cancelled()
         navigation_timed_out = False
         self._ensure_page()
         try:

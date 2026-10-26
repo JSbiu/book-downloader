@@ -1,0 +1,38 @@
+{
+  "_note": "Synthetic neutral sample following {results:[...]}; not captured from a live API.",
+  "targeted": {
+    "results": [
+      {
+        "title": "示例小说",
+        "url": "https://www.23txxt.com/bqg/100/",
+        "snippet": "示例来源目录",
+        "author": "示例作者"
+      }
+    ]
+  },
+  "broad": {
+    "results": [
+      {
+        "title": "《示例小说》",
+        "url": "https://reader.example.test/books/100?utm_source=fixture",
+        "snippet": "另一个示例来源",
+        "summary": "用于离线测试的合成摘要"
+      },
+      {
+        "title": "示例小说",
+        "url": "https://www.23txxt.com/bqg/200/?utm_medium=fixture#top",
+        "snippet": "第二个已适配来源"
+      },
+      {
+        "title": "同名但不同来源",
+        "url": "https://m.qidian.com/book/300",
+        "snippet": "应被本地过滤"
+      },
+      {
+        "title": "近似域名不应被过滤",
+        "url": "https://notqidian.com/book/400",
+        "snippet": "近似域名仍应保留"
+      }
+    ]
+  }
+}

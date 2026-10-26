@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="书页工程样机：DeepSeek 搜索、来源读取与 TXT。">
+  <title>书页 · 找书与 TXT 下载</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='13' fill='%233b53bd'/%3E%3Cpath d='M13 12h19v25H13z' fill='none' stroke='white' stroke-width='2'/%3E%3Cpath d='M18 12v25M23 20h5M23 25h5' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="ui.js"></script>
+</head>
+<body data-page="app">
+  <svg class="svg-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 3v18M12 8h4M12 12h4"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-shelf" viewBox="0 0 24 24"><path d="M3 20h18M4 5h4v13H4zM11 3h4v15h-4zM18 6l3 11"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="m10 14 4-4m-7 5-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m4 3 1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" transform="translate(2 -1)"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  </svg>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <div class="prototype-bar">
+    <div class="prototype-inner">
+      <span class="prototype-label"><span class="prototype-dot"></span>工程样机 · 前 3 章</span>
+      <span class="prototype-caption">真实搜索与页面读取；本轮验证前 3 章，不代表整本验收</span>
+      <div class="prototype-controls">
+        <span id="key-state">搜索未配置</span><button id="settings-open" type="button">设置</button>
+        <button id="about-open" type="button" aria-label="样机说明"><svg class="icon"><use href="#i-info"/></svg></button>
+      </div>
+    </div>
+  </div>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="#search" aria-label="书页首页">
+        <span class="brand-icon"><svg class="icon"><use href="#i-book"/></svg></span>
+        <span>书页</span>
+      </a>
+      <nav class="main-nav" aria-label="主要导航">
+        <button type="button" data-view="search" aria-current="page">找书</button>
+        <button type="button" data-view="library">书架 <span class="nav-number" id="library-nav-count">0</span></button>
+      </nav>
+      <button class="activity-trigger" id="activity-toggle" type="button" aria-expanded="false" aria-controls="activity-panel">
+        <svg class="icon"><use href="#i-download"/></svg><span>下载动态</span><span class="activity-number" id="activity-count" hidden></span>
+      </button>
+    </div>
+  </header>
+
+  <main id="main" class="main-content" tabindex="-1">
+    <section id="view-search" aria-labelledby="search-title">
+      <div class="search-heading"><h1 id="search-title">找书</h1><p>输入书名、作者，或粘贴目录和章节链接。</p></div>
+
+      <div class="search-area">
+        <form id="search-form" class="search-form" role="search">
+          <svg class="icon search-icon" aria-hidden="true"><use href="#i-search"/></svg>
+          <label class="sr-only" for="search-input">书名、作者或书籍链接</label>
+          <input id="search-input" type="search" placeholder="输入书名、作者，或粘贴书籍链接" autocomplete="off" enterkeyhint="search" required>
+          <button id="search-submit" class="button button-primary" type="submit">找一本书<svg class="icon"><use href="#i-arrow"/></svg></button>
+        </form>
+
+      </div>
+
+      <section id="search-results-section" class="results-section" aria-labelledby="search-results-heading" hidden>
+        <div class="section-heading"><div><h2 id="search-results-heading">搜索结果</h2><p id="search-summary" class="section-description" role="status" aria-live="polite"></p></div><button id="search-clear" type="button" class="text-button">清空搜索</button></div>
+        <p id="search-note" class="inline-note" hidden></p>
+        <p id="search-context" class="inline-note" hidden></p>
+        <button id="search-other-sources" type="button" class="text-button" hidden>查看其他书源</button>
+        <div id="search-results" class="results-grid"></div>
+        <div id="search-result-actions" class="search-result-actions" hidden>
+          <button id="search-more" type="button" class="button button-secondary">更多结果</button>
+          <button id="search-collapse" type="button" class="text-button" hidden>收起到前十条</button>
+        </div>
+        <div id="search-empty" class="empty-state" hidden><svg class="icon"><use href="#i-search"/></svg><h3 id="search-empty-title">本次未找到匹配候选</h3><p id="search-empty-note">索引可能尚未收录；也可以直接粘贴已支持来源的书籍链接。</p></div>
+      </section>
+
+      <section id="home-content" class="home-section" aria-labelledby="home-heading">
+        <div class="section-heading"><h2 id="home-heading">最近的书</h2><button class="text-button" data-view="library" type="button">查看书架<svg class="icon"><use href="#i-arrow"/></svg></button></div>
+        <div id="home-books" class="home-books"></div>
+      </section>
+    </section>
+
+    <section id="view-library" class="library-view" aria-labelledby="library-title" hidden>
+      <div class="library-heading"><div><h1 id="library-title">书架<span id="library-count" class="heading-count">0</span></h1><p id="library-summary" class="section-description">已保存的书与未完成的下载。</p></div><button type="button" class="button button-primary" data-view="search"><svg class="icon"><use href="#i-search"/></svg>找书</button></div>
+      <div class="library-toolbar" role="group" aria-label="筛选书架"><button type="button" class="filter-chip is-active" data-filter="all" aria-pressed="true">全部</button><button type="button" class="filter-chip" data-filter="active" aria-pressed="false">正在下载</button><button type="button" class="filter-chip" data-filter="attention" aria-pressed="false">待继续</button><button type="button" class="filter-chip" data-filter="ready" aria-pressed="false">已就绪</button><span class="library-tip">按加入顺序排列</span></div>
+      <div id="library-list" class="library-grid"></div>
+      <div id="library-empty" class="empty-state" hidden><svg class="icon"><use href="#i-shelf"/></svg><h2>这里还没有书</h2><p>找到想要的书，确认后就会留在书架。</p><button type="button" class="button button-primary" data-view="search">去找书<svg class="icon"><use href="#i-arrow"/></svg></button></div>
+    </section>
+  </main>
+
+  <footer class="site-footer"><span class="footer-brand">书页</span><span>本地小说下载 · TXT</span></footer>
+
+  <section id="activity-panel" class="activity-panel" aria-labelledby="activity-heading" hidden><div class="panel-heading"><h2 id="activity-heading">下载动态</h2><button type="button" class="icon-button" id="activity-close" aria-label="关闭下载动态"><svg class="icon"><use href="#i-close"/></svg></button></div><div id="activity-list"></div></section>
+
+  <aside id="download-dock" class="download-dock" aria-label="当前下载" hidden><div class="dock-icon"><svg class="icon"><use href="#i-download"/></svg></div><button id="dock-open" class="dock-copy" type="button"><strong id="dock-title"></strong><span id="dock-status"></span></button><div class="dock-meter"><span id="dock-progress"></span><div class="progress-track"><span id="dock-fill"></span></div></div><button id="dock-action" class="button button-secondary" type="button">暂停</button></aside>
+
+  <dialog id="book-dialog" class="book-dialog" aria-labelledby="detail-title">
+    <div class="dialog-topline"><span>这本书</span><button type="button" class="icon-button" id="book-close" aria-label="关闭书籍详情"><svg class="icon"><use href="#i-close"/></svg></button></div>
+    <div class="book-dialog-body">
+      <div class="detail-book-header"><div id="detail-cover" class="detail-cover"></div><div class="detail-book-copy"><p id="detail-category" class="eyebrow"></p><h2 id="detail-title"></h2><p id="detail-author" class="book-author"></p><div id="detail-facts" class="book-facts"></div></div></div>
+      <p id="detail-description" class="detail-description"></p>
+      <fieldset class="source-fieldset"><legend>来源<span>正文按这个来源保存</span></legend><div id="source-list" class="source-list"></div><p id="blocked-sources" class="inline-note" hidden></p></fieldset>
+      <details id="preview-details" class="preview-pane" open><summary><span><svg class="icon"><use href="#i-book"/></svg>正文与取得范围</span><svg class="icon"><use href="#i-chevron"/></svg></summary><div id="chapter-preview" class="chapter-preview"></div></details>
+      <section id="detail-state" class="detail-state" aria-label="这本书的下载状态" hidden><div class="detail-state-head"><strong id="detail-status"></strong><span id="detail-progress"></span></div><div class="progress-track"><span id="detail-fill"></span></div><p id="detail-activity"></p></section>
+      <details id="detail-diagnostics" class="download-details" hidden><summary>下载详情</summary><dl id="detail-diagnostics-content"></dl></details>
+    </div>
+    <div class="book-dialog-footer"><p id="detail-footer-note">入架不下载；工程样机下载范围为前 3 章。</p><div class="detail-actions"><button id="detail-primary" type="button" class="button button-primary">加入书架</button><button id="detail-update" type="button" class="button button-secondary" hidden>更新目录</button><button id="detail-export" type="button" class="button button-secondary" hidden>导出已有 TXT</button><button id="detail-other" type="button" class="text-button" hidden>其他书源</button><button id="detail-block" type="button" class="text-button remove-button" hidden>本书拉黑此书源</button><button id="detail-stop" type="button" class="text-button" hidden>暂停</button><button id="detail-remove" type="button" class="text-button remove-button" hidden>移出书架</button></div></div>
+  </dialog>
+
+  <dialog id="settings-dialog" class="small-dialog" aria-labelledby="settings-title">
+    <h2 id="settings-title">搜索设置</h2>
+    <p>使用你的 DeepSeek API Key 搜索。Key 保存在本机，仅用于搜索服务认证。</p>
+    <form id="settings-form" autocomplete="off">
+      <label for="api-key">DeepSeek API Key</label>
+      <input id="api-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="输入新的 Key；已保存的 Key 不会显示">
+      <p id="settings-status" role="status"></p>
+      <div class="small-dialog-actions"><button id="settings-clear" type="button" class="text-button">清除 Key</button><button id="settings-close" type="button" class="button button-secondary">返回</button><button type="submit" class="button button-primary">保存</button></div>
+    </form>
+  </dialog>
+  <dialog id="about-dialog" class="small-dialog" aria-labelledby="about-title">
+    <h2 id="about-title">工程样机说明</h2>
+    <p>这是同一个书页 Chrome 插件的工程版本，保留找书和书架布局。搜索使用 DeepSeek 独立搜索 API；当前支持 23txxt 与 wxdy 的目录和正文读取。已适配和前三章可读都不代表后续内容可用。</p>
+    <p>本轮仅取得前 3 章以验证持久断点、人工确认和 TXT 交付。搜索结果不代表站点已经可读；未适配来源会明确标注。</p>
+    <p>Chrome 和来源标签页需要保留。退出浏览器后保存断点，重开后点击继续。整本空缓存验收尚未完成。</p>
+    <form method="dialog"><button class="button button-primary" type="submit">返回书页</button></form>
+  </dialog>
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+  <p id="app-status" class="sr-only" role="status" aria-live="polite"></p>
+</body>
+</html>

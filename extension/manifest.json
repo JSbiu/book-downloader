@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "书页 · 工程样机",
+  "version": "0.4.1",
+  "description": "DeepSeek 搜索、来源页面读取、断点保存和 TXT 导出的工程样机。",
+  "minimum_chrome_version": "132",
+  "permissions": ["storage", "scripting", "alarms", "downloads", "offscreen"],
+  "host_permissions": [
+    "https://api.deepseek.com/*",
+    "https://*.23txxt.com/*",
+    "http://*.23txxt.com/*",
+    "https://*.wxdy.cc/*",
+    "http://*.wxdy.cc/*"
+  ],
+  "background": { "service_worker": "worker.js", "type": "module" },
+  "action": { "default_title": "打开书页" },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none';"
+  }
+}

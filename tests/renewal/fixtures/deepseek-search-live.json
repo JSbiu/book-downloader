@@ -1,0 +1,67 @@
+{
+  "fixture_kind": "sanitized_live_response",
+  "query_kind": "public_technical_documentation",
+  "observed_date": "2026-10-25",
+  "results": [
+    {
+      "title": "示例结果 1",
+      "url": "https://example.test/result/1",
+      "snippet": "中性摘要，真实文本已替换。",
+      "summary": "中性摘要，真实文本已替换。",
+      "content": "",
+      "site_name": "示例来源",
+      "site_icon": "https://example.test/icon.png",
+      "rerank_score": 2.382854461669922,
+      "authority": 3,
+      "date": "2026-09-24T16:00:00+00:00"
+    },
+    {
+      "title": "示例结果 2",
+      "url": "https://example.test/result/2",
+      "snippet": "中性摘要，真实文本已替换。",
+      "summary": "中性摘要，真实文本已替换。",
+      "content": "",
+      "site_name": "示例来源",
+      "site_icon": "https://example.test/icon.png",
+      "rerank_score": 2.257854461669922,
+      "authority": 4,
+      "date": null
+    },
+    {
+      "title": "示例结果 3",
+      "url": "https://example.test/result/3",
+      "snippet": "中性摘要，真实文本已替换。",
+      "summary": "中性摘要，真实文本已替换。",
+      "content": "",
+      "site_name": "示例来源",
+      "site_icon": "https://example.test/icon.png",
+      "rerank_score": 2.257854461669922,
+      "authority": 4,
+      "date": null
+    },
+    {
+      "title": "示例结果 4",
+      "url": "https://example.test/result/4",
+      "snippet": "中性摘要，真实文本已替换。",
+      "summary": "中性摘要，真实文本已替换。",
+      "content": "",
+      "site_name": "示例来源",
+      "site_icon": "https://example.test/icon.png",
+      "rerank_score": 2.257854461669922,
+      "authority": 3,
+      "date": null
+    },
+    {
+      "title": "示例结果 5",
+      "url": "https://example.test/result/5",
+      "snippet": "中性摘要，真实文本已替换。",
+      "summary": "中性摘要，真实文本已替换。",
+      "content": "",
+      "site_name": "示例来源",
+      "site_icon": "https://example.test/icon.png",
+      "rerank_score": 2.242229461669922,
+      "authority": 4,
+      "date": null
+    }
+  ]
+}
